@@ -10,6 +10,7 @@ ataques corren en el otro extremo, sin release/reconnect.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import pty
 import select
@@ -75,6 +76,16 @@ class PtyLink:
         tty.setraw(self._c3_slave)
         tty.setraw(self._sat_slave)
 
+        # Masters en modo NO bloqueante: un extremo sin lector (p.ej. el
+        # puerto de ataque cuando nadie escucha, o C3 todavía sin levantar)
+        # llena su buffer de kernel y, con escritura bloqueante, os.write
+        # congelaría TODO el emulador (telemetría y tick incluidos). En no
+        # bloqueante, un buffer lleno lanza BlockingIOError y se descarta el
+        # frame para ESE puerto, sin frenar al satélite ni al otro extremo.
+        for master in (self._c3_master, self._sat_master):
+            flags = fcntl.fcntl(master, fcntl.F_GETFL)
+            fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
         self.c3_slave_name = os.ttyname(self._c3_slave)
         self.sat_slave_name = os.ttyname(self._sat_slave)
         # Alias de compatibilidad: código/tests viejos que sólo conocían un
@@ -95,6 +106,8 @@ class PtyLink:
         for master in self._masters:
             try:
                 os.write(master, framed)
+            except BlockingIOError:
+                pass  # buffer lleno (ese extremo no tiene lector): se descarta
             except OSError:
                 pass  # nadie escuchando ahora mismo en ese extremo
 

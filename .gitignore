@@ -5,3 +5,5 @@ __pycache__/
 .superpowers/
 .DS_Store
 docs/superpowers/
+.c3_port
+.vulsat-telemetry-report.md

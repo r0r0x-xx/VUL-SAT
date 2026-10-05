@@ -26,6 +26,11 @@ case "${1:-}" in
     # PTY el baud es cosmético, así que este shim lo clampea a 115200 solo
     # para puertos PTY, sin tocar hardware real. No modificamos PWNSAT-C3/.
     export PYTHONPATH="$ROOT/vulsat_sim/ptycompat${PYTHONPATH:+:$PYTHONPATH}"
+    # Clave de sesión fija (demo): sin esto C3 genera una aleatoria por
+    # arranque e invalida la cookie del navegador en cada reinicio (el ws
+    # /ws queda en 403 y el dashboard muestra "NO SIGNAL"). Fija => el login
+    # sobrevive reinicios. Overrideable con PWNSAT_C3_SECRET_KEY.
+    export PWNSAT_C3_SECRET_KEY="${PWNSAT_C3_SECRET_KEY:-vulsat-demo-secret-change-me}"
     echo "[vulsat] C3 -> $PWNSAT_C3_SERIAL_PORT"
     exec "$PY" -m uvicorn backend.app:app --app-dir . ;;
   attack)
