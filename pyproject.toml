@@ -1,0 +1,12 @@
+[project]
+name = "vulsat"
+version = "0.1.0"
+description = "VUL-SAT: laboratorio de satélite vulnerable-by-design (emulador de FlatSat + ground station PWNSAT-C3 + PoCs de ataque)"
+requires-python = ">=3.11"
+dependencies = ["pyserial>=3.5", "pycryptodome>=3.20"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

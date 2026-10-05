@@ -1,0 +1,1430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PWNSAT-C3 // PWNCUBE</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+  /* Same visual system as FlatSat's dashboard (index.html) -- only the
+     accent color changes (green here vs. amber there, matching the
+     platform-select cards in platform.html). Mission state/GPS-Nav/
+     Ground station/GS Handshake/Payload-Relay panels were dropped
+     early on, when PWNCUBE had no firmware backing them, then restored
+     once STATUS/MISSION_MODE/PAYLOAD_STATUS/GS_MODE/GS_ACCESS/GS_STATUS
+     got ported to the firmware with the same APIDs FlatSat uses. The
+     ground-track world map and GS range radar (heavier canvas
+     components) were restored too, fed by the debug GPS override
+     (NAV, 0x0B) and GS_STATUS (0x13). */
+  :root {
+    --bg: #1A1420;
+    --panel: #241C2C;
+    --panel-sunken: #150F1A;
+    --line: #3A2E44;
+    --ink: #EDE6E0;
+    --ink-soft: #9C8FA6;
+    --accent: #4FD9A4;
+    --accent-ink: #08241A;
+    --ok: #8FBF6B;
+    --warn: #E08E45;
+    --bad: #D9534F;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--mono); }
+  body { padding: 18px 22px 60px; position: relative; }
+  canvas#stars { position: fixed; inset: 0; z-index: 0; opacity: .5; pointer-events: none; }
+  .sheet { position: relative; z-index: 1; }
+
+  h1, h2, h3 { font-weight: 600; margin: 0; }
+  .top {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 18px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand img { width: 34px; height: 34px; border-radius: 50%; }
+  .top h1 { font-size: 18px; letter-spacing: .04em; }
+  .top h1 .craft-tag { color: var(--accent); }
+  .top .status { font-size: 12px; color: var(--ink-soft); display: flex; gap: 16px; align-items: center; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; background: var(--ink-soft); transition: background .25s ease, box-shadow .25s ease; }
+  .dot.connected { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 2s ease-in-out infinite; }
+  .dot.stale { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .dot.lost { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+  .logout { font-size: 11px; color: var(--ink-soft); text-decoration: none; border: 1px solid var(--line); padding: 4px 9px; }
+  .logout:hover { color: var(--ink); border-color: var(--accent); }
+
+  .xswitch { display: flex; border: 1px solid var(--line); overflow: hidden; }
+  .xswitch-btn {
+    display: flex; align-items: center; font-family: var(--mono); font-size: 11px; padding: 5px 10px; margin: 0;
+    background: var(--panel-sunken); color: var(--ink-soft); border: none; cursor: pointer;
+    border-right: 1px solid var(--line); font-weight: 600; letter-spacing: .04em;
+  }
+  .xswitch-btn:last-child { border-right: none; }
+  .xswitch-btn:hover:not(:disabled) { color: var(--ink); }
+  .xswitch-btn.active { background: var(--accent); color: var(--accent-ink); }
+  .xswitch-btn.active .src-dot { background: var(--accent-ink); }
+  .xswitch-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .xswitch-btn .src-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; background: var(--ink-soft); }
+  .xswitch-btn.src-connected .src-dot { background: var(--ok); box-shadow: 0 0 5px var(--ok); }
+
+  .loc-modal {
+    position: fixed; inset: 0; background: rgba(10,7,13,0.75); z-index: 50;
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  .loc-modal.open { display: flex; }
+  .loc-modal-card {
+    position: relative; background: var(--panel); border: 1px solid var(--line);
+    padding: 32px 36px; width: 420px; max-width: 100%; animation: rise .3s ease both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .loc-modal-card::before, .loc-modal-card::after { content: ""; position: absolute; width: 14px; height: 14px; opacity: .6; pointer-events: none; }
+  .loc-modal-card::before { top: -1px; left: -1px; border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+  .loc-modal-card::after { bottom: -1px; right: -1px; border-bottom: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  .loc-modal-close {
+    position: absolute; top: 8px; right: 10px; background: none; border: none; color: var(--ink-soft);
+    font-size: 22px; line-height: 1; cursor: pointer; padding: 4px 8px; margin: 0;
+  }
+  .loc-modal-close:hover { color: var(--ink); }
+  .loc-modal-kind { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+  .loc-modal-city { font-size: 24px; font-weight: 600; margin-bottom: 18px; }
+  .loc-modal-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 6px 0; border-bottom: 1px solid #2A2130; }
+  .loc-modal-row span:first-child { color: var(--ink-soft); }
+  .loc-modal-row span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+  .loc-modal-clock { margin-top: 18px; display: flex; align-items: baseline; gap: 10px; }
+  .loc-modal-clock #locModalTime { font-size: 28px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .loc-modal-offset { font-size: 13px; color: var(--ink-soft); }
+  .loc-modal-note { margin-top: 16px; font-size: 10.5px; color: var(--ink-soft); }
+
+  .map-panel canvas { width: 100%; height: auto; display: block; border: 1px solid var(--line); background: var(--panel-sunken); cursor: grab; touch-action: none; }
+  #radarCanvas { width: 100%; max-width: 300px; height: auto; display: block; margin: 0 auto; border: 1px solid var(--line); background: var(--panel-sunken); }
+  .map-expand-backdrop { display: none; position: fixed; inset: 0; background: rgba(10,7,13,0.75); z-index: 55; }
+  .map-expand-backdrop.open { display: block; }
+  .map-panel.expanded {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(55vw, 980px); min-width: 420px; max-width: calc(100vw - 40px);
+    z-index: 56; box-shadow: 0 24px 70px rgba(0,0,0,.65); animation: none;
+  }
+  .map-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--ink-soft); margin-top: 10px; align-items: center; }
+  .map-legend .sw { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  .map-legend .sw.sat { background: var(--accent); }
+  .map-legend .sw.gs { background: var(--ok); }
+  .map-status { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .map-reset-btn {
+    font-family: var(--mono); font-size: 10.5px; padding: 3px 8px; margin: 0;
+    background: var(--panel-sunken); color: var(--ink-soft); border: 1px solid var(--line); cursor: pointer;
+  }
+  .map-reset-btn:hover { color: var(--ink); border-color: var(--accent); }
+
+  .vitals {
+    display: flex; flex-wrap: wrap; border: 1px solid var(--line); background: var(--panel);
+    margin-bottom: 14px; animation: fadeIn .4s ease both;
+  }
+  .vital { flex: 1 1 120px; padding: 10px 16px; border-right: 1px solid var(--line); }
+  .vital:last-child { border-right: none; }
+  .vital .vk { display: block; font-size: 10px; letter-spacing: .1em; color: var(--ink-soft); margin-bottom: 4px; text-transform: uppercase; }
+  .vital .vv { font-size: 16px; font-variant-numeric: tabular-nums; transition: color .3s ease; }
+  .vital.clock .vv { color: var(--accent); font-weight: 600; letter-spacing: .05em; }
+  .vv.ok { color: var(--ok); } .vv.warn { color: var(--warn); } .vv.bad { color: var(--bad); }
+
+  .health-ring { display: flex; flex-wrap: wrap; gap: 22px; }
+  .health-node { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: .04em; color: var(--ink-soft); }
+  .health-node .node-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--ink-soft); opacity: .5; transition: background .3s ease, box-shadow .3s ease, opacity .3s ease; }
+  .health-node.ok .node-dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); opacity: 1; }
+  .health-node.warn .node-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); opacity: 1; }
+  .health-node.bad .node-dot { background: var(--bad); box-shadow: 0 0 8px var(--bad); opacity: 1; animation: pulse 1.4s ease-in-out infinite; }
+
+  .trend-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; padding: 3px 0; border-bottom: 1px solid #2A2130; }
+  .trend-row:last-child { border-bottom: none; }
+  .trend-row .tr-label { color: var(--ink-soft); }
+  .trend-row .tr-value { font-variant-numeric: tabular-nums; text-align: right; min-width: 66px; }
+  .trend-row canvas { width: 70px; height: 20px; flex-shrink: 0; }
+  .gauge-spark { width: 100%; height: 22px; display: block; margin-top: 4px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+  .panel {
+    position: relative;
+    background: var(--panel); border: 1px solid var(--line); padding: 14px 16px;
+    animation: fadeIn .4s ease both;
+  }
+  .panel::before, .panel::after { content: ""; position: absolute; width: 10px; height: 10px; opacity: .5; pointer-events: none; }
+  .panel::before { top: -1px; left: -1px; border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+  .panel::after { bottom: -1px; right: -1px; border-bottom: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .panel h3 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin-bottom: 12px; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font-size: 13px; }
+  .kv .k { color: var(--ink-soft); }
+  .kv .v { font-variant-numeric: tabular-nums; text-align: right; }
+
+  .effects {
+    grid-column: 1 / -1;
+    min-height: 70px;
+    display: flex; align-items: center; justify-content: center; flex-direction: row; gap: 12px;
+    border: 1px solid var(--line);
+    transition: background .4s ease, border-color .4s ease;
+  }
+  .effects.connected { background: #182420; border-color: var(--ok); }
+  .effects.stale { background: #2A1D0F; border-color: var(--warn); animation: flicker 1s infinite; }
+  .effects.lost { background: #241014; border-color: var(--bad); }
+  .effects.reset_detected { background: #2E1119; border-color: var(--bad); animation: flash .4s 3; }
+  .effects .big { font-size: 16px; letter-spacing: .06em; transition: color .3s ease; }
+  .effects .sub { font-size: 12px; color: var(--ink-soft); }
+  @keyframes flicker { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+  @keyframes flash { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(2); } }
+
+  .gauge { margin-bottom: 10px; }
+  .gauge .label { font-size: 11px; color: var(--ink-soft); display: flex; justify-content: space-between; }
+  .gauge .bar { height: 10px; background: var(--panel-sunken); border: 1px solid var(--line); margin-top: 4px; overflow: hidden; }
+  .gauge .fill { height: 100%; background: var(--accent); width: 0%; transition: width .35s cubic-bezier(.2,.8,.2,1); }
+  .gauge .fill.flash { animation: gaugeFlash .5s ease; }
+  @keyframes gaugeFlash { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.6); box-shadow: 0 0 10px var(--accent); } }
+
+  fieldset { border: 1px solid var(--line); margin: 0 0 10px; padding: 8px 10px; }
+  legend { font-size: 11px; color: var(--ink-soft); padding: 0 4px; }
+  label { font-size: 11px; color: var(--ink-soft); display: block; margin-bottom: 2px; }
+  input, select {
+    background: var(--panel-sunken); border: 1px solid var(--line); color: var(--ink);
+    font-family: var(--mono); font-size: 12px; padding: 4px 6px; width: 100%;
+  }
+  button {
+    font-family: var(--mono); font-size: 12px; padding: 6px 10px; margin-top: 6px;
+    background: var(--accent); color: var(--accent-ink); border: none; cursor: pointer; font-weight: 600;
+    transition: filter .15s ease, transform .1s ease;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:active { transform: scale(.97); }
+  .caution { font-size: 10.5px; color: var(--warn); margin: 4px 0 8px; line-height: 1.4; }
+
+  .no-tx-note {
+    display: none; font-size: 11px; color: var(--warn); border: 1px solid var(--warn);
+    background: rgba(224,142,69,0.08); padding: 8px 10px; margin-bottom: 10px;
+  }
+  .no-tx .no-tx-note { display: block; }
+  .no-tx fieldset { opacity: .4; pointer-events: none; }
+
+  .log { height: 100%; box-sizing: border-box; overflow-y: auto; font-size: 11.5px; }
+  .log div { padding: 2px 0; border-bottom: 1px solid #2A2130; white-space: pre-wrap; word-break: break-all; animation: logIn .25s ease; }
+  @keyframes logIn { from { opacity: 0; } to { opacity: 1; } }
+  .log .tag { color: var(--accent); margin-right: 6px; }
+  .log .tag.decode_error { color: var(--bad); }
+  .log .tag.link_state { color: var(--warn); }
+</style>
+</head>
+<body>
+  <canvas id="stars"></canvas>
+
+  <div class="sheet">
+    <div class="top">
+      <div class="brand">
+        <img src="/icon.png" alt="PWNSAT-C3">
+        <h1>PWNSAT-C3 <span class="craft-tag">// PWNCUBE</span></h1>
+      </div>
+      <div class="status">
+        <span><span class="dot" id="linkDot"></span><span id="linkText">no data</span></span>
+        <div class="xswitch" id="transportSwitch">
+          <button type="button" class="xswitch-btn" data-source="cube" onclick="switchTransport('cube')"><span class="src-dot"></span>USB</button>
+          <button type="button" class="xswitch-btn" data-source="radio" onclick="switchTransport('radio')"><span class="src-dot"></span>RADIO</button>
+        </div>
+        <span id="transportText">transport: --</span>
+        <a class="logout" href="/platform">switch craft</a>
+        <a class="logout" href="/api/logout">log out</a>
+      </div>
+    </div>
+
+    <div class="vitals" id="vitalsStrip">
+      <div class="vital"><span class="vk">TX rate</span><span class="vv" id="vRate">0.0 Hz</span></div>
+      <div class="vital clock"><span class="vk">Mission clock (UTC)</span><span class="vv" id="vClock">--:--:--</span></div>
+    </div>
+
+    <div class="grid">
+
+      <div class="panel" style="grid-column: 1 / -1;">
+        <h3>System health</h3>
+        <div class="health-ring" id="healthRing">
+          <div class="health-node" id="hRadio"><div class="node-dot"></div><span>LINK</span></div>
+          <div class="health-node" id="hGps"><div class="node-dot"></div><span>GPS (DEBUG)</span></div>
+          <div class="health-node" id="hThruster"><div class="node-dot"></div><span>THRUSTERS</span></div>
+          <div class="health-node" id="hSensors"><div class="node-dot"></div><span>SENSORS</span></div>
+        </div>
+      </div>
+
+      <div class="panel effects" id="effectsPanel">
+        <div class="big" id="effectsBig">NO SIGNAL</div>
+        <div class="sub" id="effectsSub">waiting for telemetry...</div>
+      </div>
+
+      <div class="map-expand-backdrop" id="mapExpandBackdrop" onclick="collapseMap()"></div>
+      <div class="panel map-panel">
+        <h3>Ground track</h3>
+        <canvas id="mapCanvas" width="960" height="480"></canvas>
+        <div class="map-legend">
+          <span><span class="sw sat"></span>PWNCUBE (debug GPS)</span>
+          <span><span class="sw gs"></span>Ground station</span>
+          <span id="mapStatus" class="map-status">no fix yet</span>
+          <button type="button" class="map-reset-btn" onclick="resetView()">reset view</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>GS range radar</h3>
+        <!-- Same reasoning as FlatSat's dashboard (see index.html's comment
+             on this panel): the world map above is a full-planet projection,
+             so a satellite parked at distance_m=0 from its ground station
+             (this dossier's GPS-override + GS-auth-spoofing demos both use
+             the exact GS coordinates by default) lands on the same pixel no
+             matter how far you zoom. This panel always draws the ground
+             station at dead center with a range ring at a FIXED on-screen
+             radius representing the real gate radius (gs_radius_m, GS_STATUS),
+             and plots PWNCUBE at its actual proportional distance. -->
+        <canvas id="radarCanvas" width="300" height="300"></canvas>
+        <div class="map-legend">
+          <span id="radarStatus" class="map-status">no GS_STATUS yet</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Sensors</h3>
+        <div class="trend-rows" id="sensorRows"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Thrusters</h3>
+        <div class="gauge">
+          <div class="label"><span>Thruster 0</span><span id="t0v">0</span></div>
+          <div class="bar"><div class="fill" id="t0f"></div></div>
+          <canvas class="gauge-spark" id="spark_t0" width="240" height="24"></canvas>
+        </div>
+        <div class="gauge">
+          <div class="label"><span>Thruster 1</span><span id="t1v">0</span></div>
+          <div class="bar"><div class="fill" id="t1f"></div></div>
+          <canvas class="gauge-spark" id="spark_t1" width="240" height="24"></canvas>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Telemetry stats</h3>
+        <div class="kv" id="apidKv"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Mission state</h3>
+        <div class="kv" id="missionKv"></div>
+      </div>
+
+      <div class="panel">
+        <h3>GPS / Nav (debug override)</h3>
+        <div class="kv" id="navKv"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Ground station</h3>
+        <div class="kv" id="gsKv"></div>
+      </div>
+
+      <div class="panel">
+        <h3>GS Handshake</h3>
+        <div class="kv" id="gsHandshakeKv"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Payload / Relay</h3>
+        <div class="kv" id="payloadKv"></div>
+      </div>
+
+      <div class="panel" id="opsPanel">
+        <h3>Operations</h3>
+        <div class="no-tx-note" id="opsNoTxNote">This link is receive-only (radio) -- commands can't be sent over it.</div>
+        <fieldset>
+          <legend>quick</legend>
+          <button onclick="sendCommand('ping')">PING</button>
+          <button onclick="sendCommand('fw')">GET_FW_VERSION</button>
+        </fieldset>
+        <fieldset>
+          <legend>gps override (debug)</legend>
+          <label>Latitude (deg)</label><input id="gpsOverrideLat" type="number" step="0.0001" value="10.6306">
+          <label>Longitude (deg)</label><input id="gpsOverrideLon" type="number" step="0.0001" value="-85.4393">
+          <label>Altitude (m)</label><input id="gpsOverrideAlt" type="number" step="0.1" value="60">
+          <label>Satellites</label><input id="gpsOverrideSats" type="number" value="8" min="0" max="32">
+          <button onclick="sendGpsOverride()">GPS_OVERRIDE</button>
+        </fieldset>
+        <fieldset>
+          <legend>thruster</legend>
+          <label>ID (0/1)</label><input id="thrusterId" type="number" value="0" min="0" max="1">
+          <label>Power (0-255)</label><input id="thrusterPower" type="number" value="80" min="0" max="255">
+          <button onclick="sendCommand('thruster', {thruster_id: numVal('thrusterId'), power: numVal('thrusterPower')})">SET_THRUSTER</button>
+        </fieldset>
+        <fieldset>
+          <legend>reset</legend>
+          <button onclick="sendCommand('reset')">RESETC</button>
+        </fieldset>
+      </div>
+
+      <div class="panel log" id="logPanel">
+        <h3>Telemetry / events</h3>
+        <div id="logList"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="loc-modal" id="locModal" onclick="if (event.target === this) closeLocationModal();">
+    <div class="loc-modal-card">
+      <button type="button" class="loc-modal-close" onclick="closeLocationModal()">&times;</button>
+      <div class="loc-modal-kind" id="locModalKind">--</div>
+      <div class="loc-modal-city" id="locModalCity">--</div>
+      <div class="loc-modal-row"><span>Coordinates (exact)</span><span id="locModalCoords">--</span></div>
+      <div class="loc-modal-row"><span>Nearest reference</span><span id="locModalDistance">--</span></div>
+      <div class="loc-modal-row"><span>Timezone</span><span id="locModalTz">--</span></div>
+      <div class="loc-modal-clock">
+        <span id="locModalTime">--:--:--</span>
+        <span class="loc-modal-offset" id="locModalOffset"></span>
+      </div>
+      <div class="loc-modal-note">Approximate -- nearest known reference city from an offline list, not a precise reverse-geocode.</div>
+    </div>
+  </div>
+
+<script>
+  // Faint animated starfield -- same as FlatSat's dashboard, green instead
+  // of amber to match this craft's tint (see platform.html's --accent2).
+  (function () {
+    const canvas = document.getElementById('stars');
+    const ctx = canvas.getContext('2d');
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let stars = [];
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      const count = Math.floor((canvas.width * canvas.height) / 14000);
+      stars = Array.from({ length: count }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        r: Math.random() * 1.1 + 0.2,
+        speed: Math.random() * 0.1 + 0.01,
+        twinkle: Math.random() * Math.PI * 2,
+      }));
+    }
+
+    function frame() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#4FD9A4';
+      for (const star of stars) {
+        star.twinkle += 0.015;
+        ctx.globalAlpha = 0.15 + Math.abs(Math.sin(star.twinkle)) * 0.35;
+        ctx.beginPath();
+        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+        ctx.fill();
+        if (!reduced) {
+          star.y += star.speed;
+          if (star.y > canvas.height) star.y = 0;
+        }
+      }
+      ctx.globalAlpha = 1;
+      requestAnimationFrame(frame);
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    frame();
+  })();
+
+  function numVal(id) { return Number(document.getElementById(id).value); }
+
+  function setDot(cls) {
+    document.getElementById('linkDot').className = 'dot ' + cls;
+  }
+
+  function setVital(id, text, cls) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('ok', 'warn', 'bad');
+    if (cls) el.classList.add(cls);
+  }
+
+  function setHealthNode(nodeId, state) {
+    const el = document.getElementById(nodeId);
+    if (!el) return;
+    el.className = 'health-node ' + state;
+  }
+
+  // Sensor health decays to warn/bad if its own telemetry frame goes stale,
+  // independent of the overall link (a dead sensor read can lag behind an
+  // otherwise-healthy link) -- same pattern as FlatSat's dashboard.
+  const lastSeen = {};
+  function markHealth(nodeId, state) {
+    lastSeen[nodeId] = Date.now();
+    setHealthNode(nodeId, state);
+  }
+  setInterval(() => {
+    const now = Date.now();
+    for (const id of ['hSensors', 'hGps']) {
+      if (!lastSeen[id]) continue;
+      const age = now - lastSeen[id];
+      setHealthNode(id, age < 30000 ? 'ok' : age < 60000 ? 'warn' : 'bad');
+    }
+  }, 2000);
+
+  // ---------- sparkline history ----------
+  const history = {};
+  const MAX_HISTORY = 60;
+  function pushHistory(key, value) {
+    if (typeof value !== 'number' || Number.isNaN(value)) return;
+    const arr = history[key] || (history[key] = []);
+    arr.push(value);
+    if (arr.length > MAX_HISTORY) arr.shift();
+    drawSparkline(key);
+  }
+  function drawSparkline(key) {
+    const canvas = document.getElementById('spark_' + key);
+    if (!canvas) return;
+    const arr = history[key];
+    if (!arr || arr.length < 2) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const min = Math.min(...arr), max = Math.max(...arr);
+    const range = (max - min) || 1;
+    ctx.beginPath();
+    arr.forEach((v, i) => {
+      const x = (i / (arr.length - 1)) * w;
+      const y = h - ((v - min) / range) * (h - 4) - 2;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = '#4FD9A4';
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    ctx.fillStyle = 'rgba(79,217,164,0.12)';
+    ctx.fill();
+  }
+
+  // ---------- mission clock + telemetry rate ----------
+  function tickClock() {
+    const now = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    setVital('vClock', `${p(now.getUTCHours())}:${p(now.getUTCMinutes())}:${p(now.getUTCSeconds())}`);
+  }
+  // PWNCUBE's sensor frame arrives every ~10.5s (command_service.c's
+  // TELEM_INTERVAL_MS) -- same reasoning as FlatSat's dashboard: a bare
+  // 1-second bucket reads "0.0 Hz" almost always, so average arrivals over
+  // a rolling window instead.
+  const RATE_WINDOW_MS = 20000;
+  const rxTimestamps = [];
+  function recordRx() {
+    rxTimestamps.push(Date.now());
+  }
+  const apidCounts = {};
+  setInterval(() => {
+    const cutoff = Date.now() - RATE_WINDOW_MS;
+    while (rxTimestamps.length && rxTimestamps[0] < cutoff) rxTimestamps.shift();
+    const rate = rxTimestamps.length / (RATE_WINDOW_MS / 1000);
+    setVital('vRate', rate.toFixed(2) + ' Hz');
+    const apidEl = document.getElementById('apidKv');
+    if (apidEl) apidEl.innerHTML = kv(apidCounts);
+    tickClock();
+  }, 1000);
+  tickClock();
+
+  function renderEffects(msg) {
+    const panel = document.getElementById('effectsPanel');
+    const big = document.getElementById('effectsBig');
+    const sub = document.getElementById('effectsSub');
+    panel.className = 'panel effects ' + msg.state;
+    setDot(msg.state === 'reset_detected' ? 'lost' : msg.state);
+    document.getElementById('linkText').textContent = msg.state;
+    setHealthNode('hRadio', msg.state === 'connected' ? 'ok' : msg.state === 'stale' ? 'warn' : 'bad');
+    const labels = {
+      connected: ['LINK ACTIVE', 'telemetry flowing normally'],
+      stale: ['WEAK SIGNAL', 'no recent telemetry'],
+      lost: ['NO SIGNAL', 'link lost'],
+      reset_detected: ['REBOOT DETECTED', 'uptime rolled back to zero'],
+    };
+    const [b, s] = labels[msg.state] || ['--', ''];
+    big.textContent = b;
+    sub.textContent = s + (msg.last_telemetry_age_ms != null ? ` (${msg.last_telemetry_age_ms} ms ago)` : '');
+  }
+
+  function kv(obj) {
+    return Object.entries(obj).map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
+  }
+
+  function setGauge(prefix, value) {
+    document.getElementById(prefix + 'v').textContent = value;
+    const fill = document.getElementById(prefix + 'f');
+    fill.style.width = Math.min(100, (value / 255) * 100) + '%';
+    fill.classList.remove('flash');
+    void fill.offsetWidth; // restart the animation
+    fill.classList.add('flash');
+    pushHistory(prefix, value);
+  }
+
+  // Same layout tm_decoder.py's SensorTM produces -- confirmed byte-for-byte
+  // compatible with PWNCUBE's own APID 0x08 frame, no new decoder needed.
+  const SENSOR_ROWS = [
+    ['accel_temp_c', 'Accel temp', '°C'],
+    ['bme_temp_c', 'BME temp', '°C'],
+    ['bme_pressure_hpa', 'Pressure', 'hPa'],
+    ['bme_altitude_m', 'Altitude', 'm'],
+    ['bme_humidity_pct', 'Humidity', '%'],
+  ];
+
+  function renderSensors(f) {
+    if (!f) return;
+    const container = document.getElementById('sensorRows');
+    if (container.dataset.built !== '1') {
+      container.innerHTML = SENSOR_ROWS.map(([key, label]) => `
+        <div class="trend-row">
+          <span class="tr-label">${label}</span>
+          <span class="tr-value" id="val_${key}">--</span>
+          <canvas id="spark_${key}" width="70" height="20"></canvas>
+        </div>`).join('') + `
+        <div class="trend-row"><span class="tr-label">Accel XYZ</span><span class="tr-value" id="val_accel_xyz">--</span></div>`;
+      container.dataset.built = '1';
+    }
+    SENSOR_ROWS.forEach(([key, , unit]) => {
+      const value = f[key];
+      const el = document.getElementById('val_' + key);
+      if (el) el.textContent = typeof value === 'number' ? value.toFixed(2) + ' ' + unit : '--';
+      pushHistory(key, value);
+    });
+    document.getElementById('val_accel_xyz').textContent =
+      `${f.accel_x?.toFixed(2)} / ${f.accel_y?.toFixed(2)} / ${f.accel_z?.toFixed(2)}`;
+    setGauge('t0', f.thruster0_power);
+    setGauge('t1', f.thruster1_power);
+    markHealth('hSensors', 'ok');
+    const maxThrust = Math.max(f.thruster0_power || 0, f.thruster1_power || 0);
+    setHealthNode('hThruster', maxThrust >= 200 ? 'warn' : 'ok');
+  }
+
+  // STATUS (0x0C) -- same APID FlatSat uses for its own Mission-status TM,
+  // but this dashboard doesn't touch the thruster gauges from here
+  // (renderSensors already owns them from the periodic SEND_TM frame) to
+  // avoid double-counting sparkline history.
+  function renderMission(f) {
+    if (!f) return;
+    document.getElementById('missionKv').innerHTML = kv({
+      mission_mode: f.mission_mode,
+      uptime_s: f.uptime_s,
+      beacon_s: f.beacon_interval_s,
+      fw: f.fw_version,
+      payload_armed: f.status_flags_decoded?.payload_armed,
+    });
+  }
+
+  // NAV (0x0B) -- PWNCUBE's own TM_NAV (backed by its GPS_OVERRIDE debug
+  // hook), NOT FlatSat's NAV -- different byte layout, decoded by
+  // tm_decoder.py's PwncubeNavTM/decode_pwncube_nav (platform-gated,
+  // since 0x0B means FLASH_READ on FlatSat). No real GPS driver yet --
+  // override_active tells you whether anyone has injected a fake fix
+  // since boot.
+  function renderNav(f) {
+    if (!f) return;
+    const active = !!f.override_active;
+    document.getElementById('navKv').innerHTML = kv({
+      override_active: active,
+      lat: f.latitude_deg?.toFixed(6),
+      lon: f.longitude_deg?.toFixed(6),
+      alt_m: f.altitude_m?.toFixed(1),
+      satellites: f.satellites,
+    });
+    markHealth('hGps', active ? 'ok' : 'warn');
+    // Feeds the ground-track map (see pushSatFix()) -- override_active is
+    // this firmware's stand-in for FlatSat's fix_valid flag (no real GPS
+    // driver yet), same gating logic either way: only plot a position once
+    // someone has actually injected a fake fix since boot.
+    if (active && typeof f.latitude_deg === 'number' && typeof f.longitude_deg === 'number') {
+      pushSatFix(f.latitude_deg, f.longitude_deg);
+    } else {
+      setMapStatus('no fix yet');
+    }
+  }
+
+  // GS_MODE (0x11) and GS_STATUS (0x13) both report the same
+  // gs_status_flags -- either can populate this panel, matching
+  // FlatSat's own dashboard (both apid_names route here).
+  function renderGs(apidName, f) {
+    if (!f) return;
+    const flags = f.gs_status_flags_decoded || {};
+    const extra = {};
+    if (apidName === 'GS_STATUS') {
+      extra.distance_m = f.distance_m;
+      extra.session_remaining_s = f.session_remaining_s;
+      if (typeof f.gs_latitude_deg === 'number' && typeof f.gs_longitude_deg === 'number') {
+        setGroundStation(f.gs_latitude_deg, f.gs_longitude_deg, f.gs_radius_m);
+      }
+      // Feeds the GS-range radar panel (see updateRadar()) -- distance_m
+      // plus these flags are exactly what GS_MODE's within-range/session
+      // checks key off of in the firmware, same relationship FlatSat's
+      // dashboard draws from its own GS_STATUS.
+      gsLinkState = { withinRange: !!flags.within_range, authActive: !!flags.auth_active };
+      updateRadar(f.distance_m, groundStation ? groundStation.radiusM : null, gsLinkState);
+    }
+    document.getElementById('gsKv').innerHTML = kv({
+      mode_enabled: flags.mode_enabled,
+      within_range: flags.within_range,
+      auth_active: flags.auth_active,
+      gate_open: flags.gate_open,
+      ...extra,
+    });
+  }
+
+  // GS_ACCESS (0x12) -- the challenge/response handshake itself (finding
+  // #14: static XOR key -- see the ground-station-auth-spoofing attack
+  // script in PWNCUBE's own repo).
+  const GS_PHASE_NAMES = { 0: 'start (request challenge)', 1: 'finish (submit response)' };
+  function renderGsHandshake(f) {
+    if (!f) return;
+    const authClass = { accepted: 'ok', rejected: 'bad', 'challenge-issued': 'warn' }[f.auth_state_name] || '';
+    document.getElementById('gsHandshakeKv').innerHTML = kv({
+      phase: GS_PHASE_NAMES[f.phase] ?? f.phase,
+      auth_state: `<span class="${authClass ? 'vv ' + authClass : ''}">${f.auth_state_name}</span>`,
+      challenge: '0x' + (f.challenge >>> 0).toString(16).toUpperCase().padStart(8, '0'),
+      session_remaining_s: f.session_remaining_s,
+      handshake_remaining_s: f.handshake_remaining_s,
+    });
+  }
+
+  // PAYLOAD_STATUS (0x0F) -- surfaces BROADCAST_MSG relay abuse (finding
+  // #6): last_payload_freq/payload_fwd_count change the moment someone
+  // abuses the board as an RF relay, with no operator command visible
+  // anywhere else in this UI.
+  function renderPayload(f) {
+    if (!f) return;
+    document.getElementById('payloadKv').innerHTML = kv({
+      mission_mode: f.mission_mode,
+      payload_armed: f.payload_armed,
+      last_payload_freq: f.last_payload_freq,
+      payload_fwd_count: f.payload_fwd_count,
+      last_payload_len: f.last_payload_len,
+    });
+  }
+
+  // ---------- Ground track map ----------
+  // Ported from FlatSat's dashboard (index.html) unchanged except accent
+  // color (teal-green #4FD9A4 here vs. amber #D9A441 there, matching this
+  // craft's tint) -- same baked offline coastline, same zoom/pan, same
+  // click-to-inspect modal. Real coastlines (Natural Earth 110m land
+  // polygons, public domain, via the world-atlas package), simplified and
+  // pre-projected to this canvas's 960x480 equirectangular grid at
+  // authoring time -- baked in as a static path string below, no network
+  // fetch or map library at runtime.
+  const WORLD_LAND_PATH = "M321,453 L320,456 L308,456 L303,454 L315,454 L318,452 L321,453ZM55,452 L50,452 L43,450 L45,449 L50,449 L55,451 L55,452ZM360,448 L363,449 L364,453 L345,456 L336,455 L336,454 L344,452 L350,448 L360,448ZM157,436 L163,436 L159,438 L153,436 L154,436 L157,436ZM145,436 L149,437 L141,436 L145,436ZM216,432 L222,432 L223,433 L211,433 L207,432 L216,432ZM297,429 L298,430 L297,432 L290,433 L287,433 L288,432 L282,433 L280,432 L280,431 L288,430 L289,425 L293,424 L297,429ZM0,466 L3,464 L7,465 L11,464 L15,465 L19,464 L27,464 L35,466 L58,468 L66,467 L84,468 L98,467 L99,466 L80,465 L78,464 L70,463 L73,460 L72,459 L62,456 L74,456 L78,457 L90,454 L89,453 L81,452 L66,451 L59,448 L58,445 L61,446 L70,446 L72,447 L76,446 L90,444 L89,442 L90,441 L94,441 L95,441 L119,438 L161,439 L167,437 L170,438 L176,437 L181,439 L183,438 L193,440 L200,440 L212,441 L213,440 L210,438 L207,438 L205,437 L204,434 L216,434 L219,436 L223,436 L233,435 L240,436 L242,433 L244,435 L251,435 L253,436 L263,437 L266,435 L277,437 L296,435 L299,434 L301,432 L297,426 L300,423 L299,420 L301,418 L312,412 L326,409 L327,409 L323,412 L318,411 L315,413 L313,415 L314,417 L310,417 L305,421 L307,423 L311,425 L315,429 L318,435 L318,437 L308,441 L294,443 L292,444 L274,445 L275,446 L284,448 L272,449 L272,451 L279,454 L321,460 L325,462 L347,458 L366,459 L371,457 L404,454 L401,452 L401,451 L385,452 L384,451 L385,449 L403,444 L420,443 L433,440 L438,439 L439,438 L436,437 L439,435 L447,433 L453,430 L460,431 L462,429 L468,431 L478,430 L479,431 L497,428 L501,426 L505,427 L509,429 L516,427 L519,427 L520,428 L523,427 L531,426 L537,427 L540,429 L552,428 L565,426 L570,423 L583,426 L592,423 L604,420 L607,421 L611,419 L615,418 L618,417 L625,416 L630,416 L637,419 L644,421 L646,421 L651,420 L664,421 L666,425 L665,426 L661,427 L661,429 L664,428 L661,432 L666,433 L669,432 L677,426 L687,425 L691,422 L701,419 L711,419 L715,417 L717,419 L719,419 L735,420 L746,419 L754,415 L763,418 L774,418 L783,416 L788,418 L800,419 L809,417 L823,418 L839,417 L840,414 L842,415 L844,418 L847,419 L868,418 L871,421 L877,422 L887,424 L891,423 L898,425 L904,426 L911,428 L926,429 L937,431 L931,436 L923,438 L918,441 L916,443 L916,446 L919,448 L924,449 L925,450 L911,451 L906,456 L917,460 L930,462 L932,464 L942,465 L949,464 L955,465ZM299,384 L307,386 L305,387 L303,387 L301,386 L298,388 L295,388 L287,385 L281,381 L290,384 L293,381 L295,380 L297,380 L299,384ZM324,376 L326,377 L325,378 L322,379 L320,378 L318,379 L317,378 L320,377 L322,377 L324,376ZM667,373 L663,373 L664,370 L668,371 L667,373ZM868,349 L870,350 L875,349 L876,352 L874,355 L874,355 L872,356 L869,356 L866,350 L866,349 L868,349ZM941,349 L942,350 L944,349 L945,350 L945,351 L941,356 L942,357 L937,358 L935,362 L932,364 L924,363 L924,362 L925,360 L935,355 L939,349 L941,348 L941,349ZM946,336 L948,339 L948,337 L949,338 L949,340 L951,341 L956,341 L955,344 L953,344 L949,350 L947,351 L946,350 L947,348 L946,346 L944,345 L944,344 L946,343 L946,340 L940,332 L945,334 L946,336ZM926,299 L925,300 L921,298 L917,294 L920,295 L926,299ZM956,286 L957,287 L956,288 L953,288 L953,287 L954,286 L956,286ZM958,285 L957,285 L956,284 L958,284ZM1,283 L0,284ZM926,280 L926,282 L925,282 L924,279 L926,280ZM613,276 L614,282 L614,283 L613,281 L612,282 L613,285 L606,307 L601,308 L597,307 L595,299 L598,294 L597,286 L599,283 L604,282 L607,279 L608,276 L609,277 L611,272 L613,276ZM863,277 L864,279 L866,278 L868,280 L870,291 L877,294 L879,300 L880,299 L881,300 L882,300 L882,303 L888,307 L888,310 L888,313 L890,315 L888,322 L887,327 L885,328 L881,335 L880,340 L875,341 L870,344 L866,342 L867,341 L863,343 L855,341 L853,340 L852,336 L848,335 L849,334 L849,332 L847,334 L845,334 L848,330 L847,328 L844,331 L843,333 L841,332 L841,331 L838,328 L838,327 L830,324 L816,326 L811,328 L810,330 L800,331 L795,334 L791,333 L787,331 L787,330 L789,329 L789,324 L787,319 L782,310 L783,311 L783,308 L785,310 L782,305 L784,298 L785,300 L786,298 L791,295 L802,292 L806,289 L806,286 L808,284 L809,286 L810,286 L809,284 L810,283 L811,284 L812,282 L815,278 L816,278 L819,277 L822,280 L826,280 L825,278 L828,273 L834,272 L833,271 L832,270 L833,270 L841,273 L844,272 L845,273 L843,276 L841,280 L854,287 L856,286 L857,284 L858,280 L858,273 L860,268 L863,274 L863,277ZM802,267 L797,265 L800,265 L802,267 L802,267ZM909,266 L906,266 L906,265 L909,266ZM911,266 L911,266 L908,262 L909,262 L911,266ZM812,267 L809,267 L811,265 L814,263 L820,262 L814,265 L812,267ZM794,262 L797,262 L798,263 L791,264 L792,263 L794,262ZM808,262 L807,263 L800,263 L800,263 L802,262 L804,263 L808,262ZM906,262 L902,260 L906,262ZM770,258 L775,258 L775,257 L780,259 L781,260 L785,261 L789,262 L786,263 L783,262 L769,261 L761,258 L763,256 L766,256 L769,257 L770,258ZM839,257 L838,258 L838,256 L839,255 L839,257ZM896,258 L894,257 L892,254 L896,257 L896,258ZM885,255 L881,257 L876,255 L876,255 L880,255 L880,253 L881,255 L882,255 L884,253 L884,251 L886,252 L885,255ZM819,249 L818,250 L816,250 L816,248 L819,248 L819,249ZM828,248 L829,250 L827,249 L821,249 L822,248 L828,248ZM888,252 L888,253 L886,250 L882,247 L883,247 L886,249 L888,252ZM838,243 L838,247 L841,249 L843,246 L847,245 L849,245 L866,250 L869,253 L869,255 L874,256 L874,258 L872,258 L873,260 L875,261 L877,264 L878,264 L878,265 L882,267 L882,268 L874,267 L869,262 L866,260 L862,262 L862,264 L860,265 L856,264 L854,262 L851,262 L850,262 L847,262 L848,260 L850,260 L848,254 L840,252 L836,249 L835,251 L834,249 L832,248 L837,247 L837,246 L833,246 L832,244 L829,244 L828,242 L833,241 L837,242 L838,243ZM814,236 L812,239 L810,239 L800,239 L800,241 L802,244 L804,243 L809,242 L809,243 L808,242 L804,245 L807,248 L806,249 L808,252 L808,254 L807,255 L806,254 L807,252 L805,253 L804,252 L804,251 L802,250 L803,247 L801,248 L801,255 L799,255 L798,254 L799,249 L798,249 L797,247 L800,238 L802,237 L808,238 L811,238 L814,236 L814,236ZM823,237 L823,239 L822,239 L821,241 L822,242 L822,242 L820,237 L821,234 L821,236 L823,236 L823,237ZM762,256 L759,256 L754,251 L745,240 L743,235 L734,227 L734,225 L740,226 L748,234 L751,234 L757,240 L756,242 L758,243 L760,246 L762,246 L763,248 L762,256ZM794,235 L797,238 L794,238 L793,242 L791,244 L790,251 L789,250 L786,251 L785,249 L782,248 L779,249 L778,248 L774,248 L774,244 L771,241 L771,236 L772,235 L774,236 L776,235 L777,233 L781,232 L791,222 L792,222 L794,224 L798,226 L798,227 L796,227 L796,228 L794,229 L793,231 L795,234 L794,235ZM817,218 L817,221 L817,223 L816,221 L814,222 L815,224 L814,225 L811,224 L811,222 L811,220 L810,219 L806,222 L805,221 L806,219 L809,217 L810,218 L812,217 L813,216 L815,216 L814,214 L817,215 L817,218ZM697,223 L694,224 L693,222 L693,218 L694,214 L696,215 L698,220 L698,223 L697,223ZM318,213 L315,213 L316,211 L317,211 L318,213ZM811,213 L808,216 L806,214 L808,211 L809,211 L809,213 L811,210 L811,213ZM796,215 L792,218 L799,210 L799,212 L796,215ZM805,208 L808,209 L808,210 L805,212 L805,208ZM815,208 L815,211 L813,210 L814,212 L813,213 L811,209 L813,210 L813,209 L811,207 L814,207 L815,208ZM804,205 L803,207 L801,204 L803,204 L804,205ZM804,191 L805,191 L806,191 L807,194 L806,197 L804,198 L805,202 L807,202 L811,203 L811,207 L808,204 L807,205 L805,203 L802,203 L803,201 L802,201 L802,202 L800,200 L800,196 L801,197 L802,191 L804,191ZM305,191 L301,192 L301,191 L303,191 L305,191ZM275,192 L274,193 L271,191 L273,191 L275,191 L277,192 L275,192ZM286,187 L293,188 L298,190 L297,191 L292,191 L290,193 L287,191 L283,192 L281,191 L282,190 L287,190 L286,188 L284,188 L286,187ZM774,190 L772,191 L770,191 L770,188 L771,187 L775,186 L776,187 L774,190ZM65,189 L64,189 L64,186 L67,188 L65,189ZM268,179 L269,180 L271,180 L276,183 L278,184 L278,185 L282,186 L280,187 L273,187 L274,186 L272,185 L270,182 L261,180 L262,180 L259,179 L256,182 L253,182 L257,179 L261,178 L268,179ZM273,177 L271,174 L271,173 L272,173 L273,177ZM803,179 L802,181 L800,177 L804,173 L805,173 L803,179ZM839,149 L839,150 L838,151 L837,151 L835,153 L833,152 L834,149 L836,149 L837,148 L839,149ZM572,145 L570,146 L571,147 L568,148 L566,146 L572,145ZM543,145 L545,146 L550,146 L550,147 L546,147 L543,146 L543,145ZM521,138 L520,142 L513,140 L514,138 L521,138ZM505,130 L506,132 L506,136 L503,136 L502,136 L502,131 L505,130ZM856,141 L855,143 L855,144 L854,146 L851,148 L846,148 L842,151 L840,150 L840,148 L829,150 L832,152 L830,156 L828,157 L827,156 L828,154 L825,151 L828,150 L834,146 L839,145 L842,145 L845,141 L846,142 L852,138 L853,135 L853,132 L854,130 L857,130 L858,136 L856,138 L856,141ZM505,128 L505,130 L503,129 L503,127 L505,125 L505,128ZM864,122 L866,123 L868,122 L868,125 L864,125 L862,128 L858,126 L856,129 L853,129 L853,126 L854,124 L857,124 L859,119 L864,122ZM310,116 L315,116 L312,117 L308,115 L309,115 L310,116ZM315,109 L308,107 L312,107 L315,109ZM151,111 L145,110 L141,107 L139,107 L138,105 L145,106 L151,111ZM330,105 L329,107 L330,106 L332,107 L331,108 L337,109 L337,111 L338,110 L340,113 L338,116 L336,115 L336,113 L335,113 L332,115 L331,115 L333,114 L330,113 L322,113 L322,112 L323,111 L322,111 L324,109 L327,105 L329,103 L332,102 L330,105ZM126,96 L129,96 L128,99 L130,101 L125,98 L125,96 L126,96ZM863,105 L866,109 L862,109 L860,112 L863,115 L863,117 L861,115 L859,117 L858,110 L859,104 L858,102 L858,98 L860,97 L859,95 L860,95 L863,105ZM462,101 L457,102 L453,102 L456,99 L454,96 L460,93 L462,93 L465,95 L463,96 L464,98 L462,101ZM514,92 L512,94 L509,92 L509,91 L513,90 L514,92ZM72,88 L69,89 L68,87 L71,85 L74,86 L72,88ZM472,84 L469,87 L475,86 L474,88 L472,91 L474,91 L477,94 L479,95 L481,99 L484,99 L484,101 L483,102 L484,103 L481,105 L472,105 L470,106 L468,106 L466,107 L465,106 L469,103 L471,103 L467,102 L466,101 L469,101 L467,99 L468,97 L472,98 L472,96 L470,94 L467,94 L466,93 L467,92 L467,91 L465,93 L465,90 L464,89 L465,86 L467,84 L472,84ZM38,80 L37,81 L33,79 L38,79 L38,80ZM269,74 L268,76 L266,75 L267,74 L269,74ZM262,73 L258,74 L256,73 L258,72 L262,73ZM22,70 L30,71 L28,72 L23,71 L22,70ZM253,65 L253,66 L255,66 L262,68 L263,69 L266,70 L264,71 L260,70 L258,69 L252,72 L251,70 L247,71 L250,69 L251,65 L253,65ZM441,63 L441,65 L444,66 L440,68 L430,71 L419,69 L422,68 L416,67 L421,66 L421,66 L415,65 L417,63 L421,63 L425,65 L429,63 L433,64 L437,63 L441,63ZM278,61 L275,61 L274,60 L275,58 L280,59 L279,60 L278,61ZM0,56 L14,61 L13,62 L15,63 L14,61 L22,62 L27,64 L24,65 L20,65 L20,68 L19,69 L11,67 L10,66 L4,66 L3,65 L4,64 L0,64 L2,66 L0,67ZM960,67 L957,68 L953,68 L958,72 L958,74 L953,73 L943,76 L935,79 L934,80 L930,78 L923,81 L922,80 L920,81 L916,80 L912,85 L912,86 L915,86 L915,90 L912,90 L911,93 L912,94 L908,95 L907,98 L903,99 L902,101 L898,104 L894,92 L896,89 L898,87 L898,86 L902,85 L916,77 L919,73 L915,73 L914,76 L907,79 L905,75 L898,76 L891,81 L893,82 L883,83 L884,81 L879,81 L876,82 L868,82 L859,83 L840,94 L845,94 L846,96 L848,97 L850,95 L853,95 L857,98 L857,101 L855,103 L853,111 L849,117 L840,124 L836,126 L834,126 L833,125 L827,128 L826,131 L820,134 L820,135 L822,137 L825,142 L825,145 L824,146 L817,148 L817,145 L816,142 L818,142 L816,139 L815,139 L814,140 L813,138 L814,137 L814,135 L811,134 L803,136 L804,135 L804,134 L806,132 L804,131 L797,135 L795,135 L793,137 L795,139 L797,139 L797,140 L799,141 L802,139 L806,140 L807,142 L803,142 L798,147 L801,148 L805,155 L805,157 L803,158 L806,160 L804,165 L803,165 L796,175 L789,179 L786,180 L784,181 L783,180 L782,181 L775,183 L775,186 L773,186 L772,184 L773,183 L769,182 L765,185 L762,187 L762,189 L766,195 L770,199 L772,204 L771,209 L760,217 L759,215 L760,214 L756,212 L754,208 L751,206 L749,206 L749,204 L747,204 L745,215 L746,215 L748,220 L755,225 L756,227 L756,233 L758,237 L756,237 L750,233 L747,226 L747,223 L743,218 L742,219 L742,218 L743,209 L742,208 L743,205 L739,195 L734,198 L731,197 L732,194 L732,191 L729,188 L730,187 L728,187 L726,185 L724,179 L721,179 L721,182 L717,181 L717,182 L712,183 L712,185 L711,186 L707,188 L699,195 L699,196 L694,198 L693,200 L694,205 L693,208 L693,212 L692,213 L690,215 L691,215 L689,216 L687,219 L684,216 L680,206 L679,201 L676,197 L674,183 L670,185 L668,184 L664,181 L666,180 L665,179 L660,176 L657,172 L644,173 L633,171 L632,168 L631,168 L626,169 L617,166 L614,160 L612,160 L611,159 L610,160 L608,160 L610,166 L614,169 L614,171 L615,174 L616,171 L618,171 L617,174 L618,176 L624,176 L630,170 L630,174 L632,175 L637,177 L639,181 L636,186 L634,186 L634,189 L631,190 L630,192 L627,193 L627,194 L620,196 L619,198 L612,201 L610,203 L602,205 L600,206 L596,206 L594,199 L594,195 L589,188 L584,183 L584,180 L583,177 L580,175 L578,172 L574,165 L572,165 L573,161 L570,166 L566,160 L571,170 L575,176 L575,178 L578,181 L580,190 L582,192 L585,198 L596,207 L595,208 L594,209 L598,212 L599,212 L616,208 L616,212 L612,222 L607,229 L604,232 L595,239 L591,244 L587,247 L585,252 L583,257 L585,258 L585,263 L588,269 L589,279 L585,285 L580,287 L573,293 L573,295 L575,299 L575,304 L567,309 L568,310 L566,317 L555,327 L549,331 L540,330 L532,333 L529,330 L528,327 L529,326 L529,324 L521,312 L518,299 L511,288 L511,282 L513,276 L516,272 L516,269 L514,264 L515,263 L512,253 L503,243 L506,232 L505,230 L504,230 L503,227 L496,229 L492,223 L485,224 L475,227 L468,226 L460,228 L456,227 L447,221 L445,219 L445,216 L440,211 L436,208 L435,204 L433,201 L436,197 L437,192 L437,186 L435,184 L435,182 L437,180 L437,177 L440,175 L441,170 L446,165 L449,165 L454,160 L454,157 L455,153 L462,149 L464,145 L474,146 L484,142 L494,142 L497,141 L502,141 L505,140 L507,141 L507,142 L510,142 L508,143 L509,145 L509,147 L507,148 L508,150 L509,150 L511,152 L521,154 L522,156 L531,159 L533,157 L533,155 L534,154 L537,152 L541,153 L542,154 L546,155 L547,156 L551,156 L557,158 L563,156 L565,156 L565,158 L566,157 L570,157 L572,156 L576,148 L576,144 L575,143 L576,142 L573,142 L571,143 L567,144 L565,142 L562,142 L561,143 L559,144 L557,142 L554,142 L550,138 L551,136 L550,135 L553,132 L557,132 L558,130 L563,130 L569,128 L574,128 L582,131 L588,131 L591,129 L591,128 L591,126 L578,119 L580,119 L582,117 L580,116 L584,114 L573,117 L573,118 L577,119 L577,120 L570,122 L569,121 L569,120 L567,119 L570,118 L569,117 L565,116 L564,115 L562,116 L559,120 L557,120 L556,123 L554,126 L555,129 L557,130 L557,131 L554,131 L550,133 L549,131 L546,131 L543,132 L545,133 L544,133 L542,133 L541,132 L540,133 L542,135 L541,136 L544,138 L544,140 L542,139 L542,140 L541,141 L542,143 L540,143 L538,142 L536,138 L532,133 L532,129 L523,124 L520,122 L520,120 L518,119 L517,121 L516,120 L517,118 L515,118 L513,119 L514,122 L520,128 L522,128 L523,129 L522,129 L529,133 L529,134 L525,132 L524,134 L526,135 L525,136 L524,136 L523,139 L522,139 L523,136 L521,133 L512,129 L508,126 L507,123 L504,122 L497,125 L492,124 L488,125 L488,128 L486,130 L482,131 L479,135 L480,137 L478,140 L476,140 L474,142 L468,142 L466,144 L464,144 L463,141 L456,142 L456,138 L455,137 L457,131 L456,126 L455,125 L459,123 L475,124 L476,123 L477,117 L472,113 L468,112 L468,110 L471,110 L476,110 L475,107 L477,108 L484,106 L484,104 L490,102 L493,98 L499,97 L502,97 L503,96 L502,92 L502,89 L503,88 L508,86 L507,88 L509,89 L506,92 L507,94 L509,95 L509,96 L513,95 L518,97 L527,94 L532,95 L533,94 L537,93 L536,89 L538,87 L540,86 L542,88 L544,88 L545,84 L542,84 L542,82 L549,81 L555,81 L558,80 L555,79 L541,80 L537,78 L537,75 L536,73 L537,71 L548,66 L547,65 L544,64 L539,65 L537,67 L537,68 L528,73 L526,76 L530,80 L528,83 L525,83 L522,90 L519,90 L518,92 L515,92 L509,83 L508,81 L502,84 L499,85 L495,84 L493,75 L496,73 L508,68 L519,59 L531,54 L541,53 L545,51 L555,50 L563,52 L560,53 L563,55 L566,54 L570,55 L577,56 L589,60 L590,62 L582,64 L568,62 L573,64 L573,68 L579,70 L579,68 L577,67 L579,66 L586,68 L588,67 L586,65 L592,63 L597,64 L599,62 L597,60 L598,59 L596,57 L603,58 L605,59 L601,60 L602,61 L604,62 L608,62 L608,60 L623,56 L625,57 L623,58 L626,58 L637,56 L640,58 L643,56 L640,55 L641,54 L649,55 L663,58 L664,57 L662,55 L658,55 L659,54 L658,51 L663,48 L665,46 L674,46 L674,47 L672,50 L673,50 L674,52 L674,56 L676,58 L670,63 L673,64 L677,62 L680,59 L679,58 L680,56 L677,56 L676,54 L678,52 L675,49 L680,48 L679,46 L680,46 L682,47 L681,50 L684,50 L682,48 L687,47 L692,47 L697,49 L695,46 L695,44 L712,43 L709,41 L712,40 L729,37 L738,38 L744,36 L749,36 L752,34 L758,33 L763,34 L759,34 L765,35 L766,36 L776,35 L784,38 L784,39 L772,42 L779,43 L781,43 L783,44 L788,43 L797,44 L797,45 L809,45 L809,43 L819,44 L823,45 L824,47 L823,48 L826,50 L830,51 L833,48 L837,50 L841,49 L847,50 L849,49 L853,49 L851,47 L855,46 L879,47 L881,49 L888,51 L904,51 L906,52 L906,54 L909,55 L928,54 L932,57 L936,56 L933,54 L935,53 L949,54 L956,55ZM611,130 L612,132 L614,133 L612,133 L610,136 L611,140 L616,142 L624,141 L624,136 L622,135 L622,133 L621,133 L621,131 L624,132 L626,131 L623,128 L621,128 L621,130 L620,126 L617,125 L614,121 L617,121 L617,119 L621,119 L621,115 L617,115 L611,116 L610,118 L607,118 L604,121 L607,124 L607,125 L611,130ZM225,56 L223,57 L214,55 L218,53 L225,56ZM960,51 L957,51 L957,50ZM0,49 L6,50 L0,51 L0,49ZM239,55 L239,57 L242,55 L245,57 L244,59 L247,61 L252,57 L252,54 L260,54 L263,56 L263,57 L261,58 L263,60 L263,61 L258,63 L254,63 L251,63 L247,67 L244,69 L240,69 L238,70 L238,72 L235,72 L232,75 L229,78 L228,83 L231,83 L234,88 L238,87 L253,93 L261,93 L260,95 L261,98 L263,101 L267,103 L269,103 L270,100 L269,96 L267,94 L271,93 L276,89 L276,87 L274,85 L271,83 L274,80 L272,74 L274,73 L281,74 L283,73 L290,77 L294,77 L295,83 L298,83 L300,85 L303,83 L308,79 L316,88 L315,90 L321,93 L327,94 L328,97 L331,98 L332,101 L323,104 L320,106 L303,106 L301,108 L297,109 L290,115 L293,115 L297,111 L303,109 L307,109 L309,110 L306,112 L308,117 L312,118 L316,118 L319,115 L319,117 L321,118 L306,124 L304,124 L304,121 L308,119 L301,120 L301,121 L293,124 L291,125 L291,127 L292,129 L293,129 L293,128 L294,128 L293,129 L283,131 L288,131 L283,131 L282,132 L283,132 L282,134 L280,136 L279,135 L280,138 L277,141 L278,139 L277,138 L276,136 L276,138 L275,138 L277,139 L278,145 L276,147 L269,151 L263,156 L263,160 L267,168 L266,173 L264,173 L262,171 L259,166 L260,164 L259,162 L256,160 L253,161 L250,159 L242,159 L241,160 L242,162 L240,162 L238,162 L236,161 L230,161 L222,165 L220,167 L221,171 L219,180 L223,188 L228,192 L235,190 L238,189 L239,184 L248,183 L248,184 L246,188 L246,191 L245,191 L244,196 L243,198 L253,197 L258,199 L258,202 L257,210 L261,216 L263,217 L268,214 L275,217 L278,215 L279,212 L280,210 L284,210 L289,207 L290,208 L290,209 L288,210 L289,212 L288,214 L289,216 L290,216 L291,214 L290,211 L293,210 L293,208 L293,208 L294,209 L296,209 L298,212 L303,212 L307,213 L308,212 L315,211 L313,212 L314,213 L318,215 L318,217 L322,219 L324,222 L328,224 L336,225 L339,226 L342,229 L343,229 L345,235 L347,235 L347,237 L345,239 L346,240 L350,241 L350,243 L352,242 L360,244 L362,246 L361,247 L364,246 L369,248 L373,248 L381,253 L385,254 L387,260 L386,264 L377,275 L375,288 L374,292 L371,296 L371,298 L369,300 L368,301 L361,302 L353,306 L351,309 L350,316 L345,323 L341,326 L337,332 L334,333 L330,333 L326,332 L324,330 L324,332 L327,334 L327,336 L329,337 L329,338 L326,342 L322,343 L314,344 L314,348 L313,349 L310,350 L307,349 L306,350 L307,352 L309,353 L310,352 L311,354 L306,356 L305,360 L303,360 L301,361 L300,363 L302,365 L305,366 L304,368 L301,370 L299,373 L296,375 L296,378 L298,380 L295,379 L291,381 L291,384 L287,383 L280,379 L278,370 L280,367 L282,365 L278,364 L281,362 L282,358 L285,359 L286,353 L284,352 L283,356 L282,355 L284,347 L285,345 L284,339 L285,339 L290,326 L289,317 L291,314 L293,293 L292,289 L290,287 L289,286 L277,279 L277,276 L267,259 L263,256 L264,255 L263,253 L267,247 L267,246 L266,247 L264,246 L264,243 L265,242 L266,238 L270,236 L269,235 L270,235 L271,233 L272,233 L274,230 L273,229 L273,222 L271,220 L271,219 L272,218 L269,216 L268,216 L265,218 L267,220 L264,221 L264,219 L257,217 L257,216 L253,213 L253,215 L252,214 L252,211 L251,211 L251,210 L246,206 L247,205 L247,205 L244,205 L237,203 L231,198 L227,197 L223,198 L204,191 L199,187 L198,186 L199,185 L199,183 L197,179 L191,173 L189,172 L189,169 L186,168 L185,166 L184,165 L181,163 L178,157 L174,155 L174,160 L182,169 L185,175 L186,175 L188,178 L187,179 L186,178 L181,174 L181,171 L173,166 L174,166 L176,164 L172,161 L167,152 L164,149 L158,148 L148,132 L149,128 L148,126 L150,119 L148,112 L152,112 L153,114 L154,114 L152,109 L145,106 L140,104 L139,102 L139,100 L136,99 L135,97 L132,95 L132,94 L128,92 L127,90 L124,88 L122,85 L116,85 L107,81 L100,80 L96,80 L88,78 L85,78 L85,80 L75,82 L75,81 L76,78 L79,77 L78,77 L69,82 L71,83 L69,85 L63,87 L63,88 L58,89 L58,91 L41,95 L40,94 L49,91 L52,91 L59,86 L61,83 L56,84 L54,83 L53,84 L52,82 L48,84 L48,81 L47,80 L43,81 L39,79 L39,77 L37,76 L41,72 L45,72 L51,70 L51,69 L49,68 L51,67 L46,68 L40,68 L36,68 L32,65 L41,62 L44,62 L43,64 L49,64 L39,59 L35,58 L37,56 L42,56 L45,55 L46,54 L48,52 L58,51 L62,50 L66,50 L68,51 L74,51 L74,52 L78,52 L97,53 L116,56 L122,54 L126,55 L134,53 L136,54 L138,53 L138,52 L145,55 L148,53 L149,55 L153,54 L156,54 L166,56 L173,56 L176,58 L173,59 L177,59 L187,59 L190,60 L193,59 L190,58 L192,57 L197,57 L202,59 L209,60 L217,59 L217,58 L220,57 L224,58 L224,61 L225,58 L228,58 L229,56 L223,53 L223,50 L226,48 L232,50 L236,53 L234,54 L239,55ZM176,45 L174,46 L180,45 L184,47 L187,45 L189,46 L191,49 L193,48 L191,45 L196,45 L199,46 L201,51 L211,53 L210,54 L206,55 L208,56 L207,57 L197,56 L178,57 L176,56 L170,56 L167,53 L180,52 L166,52 L164,51 L170,50 L162,49 L166,46 L173,44 L176,45ZM201,44 L199,46 L195,44 L201,44ZM276,45 L277,46 L268,46 L264,44 L264,43 L266,43 L272,44 L276,45ZM249,45 L251,47 L254,44 L260,43 L265,46 L265,48 L272,46 L282,49 L282,50 L287,49 L290,51 L297,52 L301,56 L297,57 L307,59 L311,62 L315,62 L314,64 L310,67 L302,63 L299,63 L298,65 L306,68 L308,71 L307,73 L297,70 L304,75 L291,72 L287,71 L288,70 L280,68 L280,68 L273,69 L271,68 L272,66 L283,65 L282,65 L286,61 L286,59 L280,57 L275,56 L277,56 L269,53 L263,54 L253,53 L244,52 L241,51 L244,50 L240,50 L239,47 L242,45 L251,43 L249,45ZM212,43 L220,43 L221,44 L219,45 L223,47 L222,49 L215,50 L207,47 L207,46 L212,46 L209,44 L212,43ZM863,45 L853,44 L859,43 L863,45ZM231,46 L229,48 L226,48 L224,44 L228,42 L239,43 L235,45 L231,46ZM159,50 L152,51 L150,50 L144,48 L149,44 L147,42 L167,42 L172,44 L162,47 L159,48 L159,50ZM882,40 L879,41 L870,40 L870,39 L882,40ZM230,40 L229,41 L222,40 L223,39 L227,38 L230,40ZM867,38 L865,40 L851,41 L845,39 L847,37 L850,37 L867,38ZM217,35 L219,37 L218,40 L214,40 L211,40 L211,38 L207,38 L206,36 L217,35ZM191,37 L192,38 L198,37 L198,39 L196,40 L181,42 L177,42 L176,41 L182,40 L166,39 L172,36 L189,39 L185,36 L188,35 L191,36 L191,37ZM633,51 L623,51 L622,50 L618,49 L617,48 L620,47 L620,46 L625,44 L623,43 L629,41 L628,40 L643,37 L657,35 L662,35 L664,36 L644,39 L636,42 L628,47 L628,49 L633,51ZM228,34 L236,35 L238,36 L237,37 L242,38 L264,38 L267,39 L267,40 L261,41 L241,41 L234,40 L232,38 L230,36 L221,35 L222,34 L228,34ZM170,33 L170,35 L168,36 L156,38 L152,37 L162,33 L170,33ZM230,33 L224,33 L223,32 L228,32 L230,33ZM186,33 L181,34 L177,33 L179,32 L187,32 L186,33ZM546,32 L540,33 L535,33 L537,32 L536,31 L541,31 L542,32 L546,32ZM188,30 L180,31 L183,30 L188,30ZM224,32 L218,32 L217,30 L225,31 L224,32ZM213,31 L214,32 L200,31 L202,30 L199,30 L199,29 L211,30 L213,31ZM760,31 L745,32 L750,29 L752,28 L761,30 L760,31ZM529,27 L537,29 L531,31 L529,32 L527,33 L526,35 L522,35 L517,34 L519,33 L510,30 L508,28 L515,27 L517,28 L520,28 L521,27 L525,27 L529,27ZM548,26 L553,27 L549,28 L541,28 L534,28 L526,26 L535,25 L538,26 L541,25 L548,26ZM616,25 L607,27 L604,26 L606,25 L600,25 L609,25 L609,25 L613,24 L617,25 L616,25ZM747,30 L733,29 L729,28 L727,26 L723,26 L736,23 L747,27 L747,30ZM248,28 L251,28 L243,31 L238,31 L232,31 L229,30 L229,29 L232,28 L227,28 L222,26 L226,24 L229,24 L227,23 L234,23 L237,25 L246,26 L248,28ZM297,18 L315,20 L315,20 L300,23 L305,23 L295,25 L290,27 L275,28 L279,29 L277,29 L279,31 L267,34 L272,35 L272,35 L265,37 L241,36 L241,35 L246,34 L245,32 L253,33 L250,32 L245,31 L252,29 L253,28 L249,27 L248,26 L258,26 L262,25 L246,25 L242,24 L236,22 L252,20 L258,20 L260,19 L269,18 L297,18ZM408,17 L424,19 L419,20 L395,21 L414,22 L419,21 L421,22 L418,24 L438,22 L446,22 L447,23 L435,26 L427,26 L433,26 L427,30 L428,33 L431,35 L422,36 L427,37 L428,39 L425,40 L428,42 L422,42 L426,43 L425,44 L417,45 L420,46 L421,48 L415,46 L414,47 L421,49 L422,52 L417,52 L412,50 L413,51 L410,53 L420,53 L406,57 L395,58 L389,62 L383,64 L374,65 L372,67 L372,69 L370,71 L366,73 L367,75 L364,80 L361,80 L357,78 L351,78 L342,70 L341,66 L337,64 L338,62 L336,61 L339,58 L343,57 L344,54 L337,55 L334,54 L334,53 L335,51 L343,52 L336,49 L331,49 L334,46 L327,41 L324,40 L324,39 L317,37 L297,37 L290,35 L302,34 L285,32 L285,31 L305,28 L306,27 L299,26 L314,23 L313,22 L327,21 L336,21 L339,22 L346,20 L361,22 L355,21 L355,20 L377,17 L408,17Z";
+  const worldLandPath2D = new Path2D(WORLD_LAND_PATH);
+
+  const mapCanvas = document.getElementById('mapCanvas');
+  const mapCtx = mapCanvas.getContext('2d');
+  const LOGICAL_W = 960, LOGICAL_H = 480;
+
+  const mapBase = document.createElement('canvas');
+  mapBase.width = LOGICAL_W;
+  mapBase.height = LOGICAL_H;
+  const mapBaseCtx = mapBase.getContext('2d');
+  const MAX_TRACK_POINTS = 40;
+  const satTrack = [];
+  let groundStation = null; // { lat, lon, radiusM }
+  let gsLinkState = null; // { withinRange, authActive }
+
+  function project(lat, lon) {
+    return { x: (lon + 180) / 360 * LOGICAL_W, y: (90 - lat) / 180 * LOGICAL_H };
+  }
+
+  function setMapStatus(text) {
+    document.getElementById('mapStatus').textContent = text;
+  }
+
+  function pushSatFix(lat, lon) {
+    satTrack.push({ lat, lon });
+    if (satTrack.length > MAX_TRACK_POINTS) satTrack.shift();
+    setMapStatus(`lat ${lat.toFixed(3)}  lon ${lon.toFixed(3)}`);
+    drawMapBase();
+  }
+
+  function setGroundStation(lat, lon, radiusM) {
+    groundStation = { lat, lon, radiusM };
+    drawMapBase();
+  }
+
+  // ---------- GS range radar ----------
+  const radarCanvas = document.getElementById('radarCanvas');
+  const radarCtx = radarCanvas ? radarCanvas.getContext('2d') : null;
+  const RADAR_W = 300, RADAR_H = 300, RADAR_CX = 150, RADAR_CY = 150, RADAR_MAXR = 118;
+
+  function updateRadar(distanceM, radiusM, linkState) {
+    if (!radarCtx) return;
+    const statusEl = document.getElementById('radarStatus');
+    radarCtx.clearRect(0, 0, RADAR_W, RADAR_H);
+
+    radarCtx.strokeStyle = 'rgba(156,143,166,0.18)';
+    radarCtx.lineWidth = 1;
+    for (const frac of [1 / 3, 2 / 3, 1]) {
+      radarCtx.beginPath();
+      radarCtx.arc(RADAR_CX, RADAR_CY, RADAR_MAXR * frac, 0, Math.PI * 2);
+      radarCtx.stroke();
+    }
+    radarCtx.strokeStyle = 'rgba(156,143,166,0.15)';
+    radarCtx.beginPath(); radarCtx.moveTo(RADAR_CX - RADAR_MAXR, RADAR_CY); radarCtx.lineTo(RADAR_CX + RADAR_MAXR, RADAR_CY); radarCtx.stroke();
+    radarCtx.beginPath(); radarCtx.moveTo(RADAR_CX, RADAR_CY - RADAR_MAXR); radarCtx.lineTo(RADAR_CX, RADAR_CY + RADAR_MAXR); radarCtx.stroke();
+
+    // The 100% ring is the actual firmware gate (GS_MODE's within-range
+    // check, ported byte-for-byte from FlatSat's worker.cpp into
+    // command_service.c).
+    radarCtx.strokeStyle = 'rgba(143,191,107,0.55)';
+    radarCtx.lineWidth = 1.5;
+    radarCtx.beginPath();
+    radarCtx.arc(RADAR_CX, RADAR_CY, RADAR_MAXR, 0, Math.PI * 2);
+    radarCtx.stroke();
+
+    radarCtx.strokeStyle = '#8FBF6B';
+    radarCtx.lineWidth = 1.5;
+    radarCtx.beginPath(); radarCtx.moveTo(RADAR_CX - 6, RADAR_CY); radarCtx.lineTo(RADAR_CX + 6, RADAR_CY); radarCtx.stroke();
+    radarCtx.beginPath(); radarCtx.moveTo(RADAR_CX, RADAR_CY - 6); radarCtx.lineTo(RADAR_CX, RADAR_CY + 6); radarCtx.stroke();
+
+    if (typeof distanceM !== 'number' || !radiusM) {
+      if (statusEl) statusEl.textContent = 'no GS_STATUS yet';
+      return;
+    }
+    // 0xFFFF is the firmware's sentinel for "distance not computable" (same
+    // encoding FlatSat's worker.cpp uses, ported into command_service.c) --
+    // a real GS_STATUS DID arrive, it's just reporting no usable/in-range
+    // GPS fix right now. Distinct from "never received one" above so this
+    // doesn't look like the panel is broken when it's accurately reporting
+    // PWNCUBE's real state.
+    if (distanceM === 0xFFFF) {
+      if (statusEl) statusEl.textContent = 'GS_STATUS received -- no usable GPS fix / too far to compute distance';
+      return;
+    }
+
+    let angle = 0;
+    if (groundStation && satTrack.length > 0) {
+      const sat = satTrack[satTrack.length - 1];
+      const avgLatRad = (groundStation.lat + sat.lat) / 2 * Math.PI / 180;
+      const dLon = (sat.lon - groundStation.lon) * Math.cos(avgLatRad);
+      const dLat = sat.lat - groundStation.lat;
+      angle = Math.atan2(dLon, dLat);
+    }
+
+    const frac = distanceM / radiusM;
+    const clamped = frac > 1.3;
+    const plotFrac = Math.min(frac, 1.3);
+    const px = RADAR_CX + Math.sin(angle) * RADAR_MAXR * plotFrac;
+    const py = RADAR_CY - Math.cos(angle) * RADAR_MAXR * plotFrac;
+
+    const color = !linkState || !linkState.withinRange ? 'rgba(196,90,90,0.9)'
+      : linkState.authActive ? 'rgba(122,196,122,0.95)' : 'rgba(217,164,65,0.85)';
+
+    radarCtx.strokeStyle = color;
+    radarCtx.lineWidth = linkState && linkState.authActive ? 2.5 : 1.5;
+    if (clamped) radarCtx.setLineDash([5, 4]);
+    radarCtx.beginPath(); radarCtx.moveTo(RADAR_CX, RADAR_CY); radarCtx.lineTo(px, py); radarCtx.stroke();
+    radarCtx.setLineDash([]);
+
+    radarCtx.fillStyle = color;
+    radarCtx.beginPath(); radarCtx.arc(px, py, clamped ? 4 : 5, 0, Math.PI * 2); radarCtx.fill();
+
+    if (statusEl) {
+      const km = (distanceM / 1000).toFixed(1);
+      const rangeKm = (radiusM / 1000).toFixed(0);
+      const stateTxt = linkState && linkState.authActive ? 'SESSION ACTIVE'
+        : linkState && linkState.withinRange ? 'in range, no session' : 'OUT OF RANGE';
+      statusEl.textContent = `${km} km / ${rangeKm} km range -- ${stateTxt}${clamped ? ' (off-scale)' : ''}`;
+    }
+  }
+
+  // ---------- DPR-crisp resize + zoom/pan ----------
+  const MIN_ZOOM = 1, MAX_ZOOM = 8;
+  const view = { scale: 1, tx: 0, ty: 0 };
+
+  function cssScale() {
+    return (mapCanvas.clientWidth || LOGICAL_W) / LOGICAL_W;
+  }
+
+  function resizeMapCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = mapCanvas.clientWidth || LOGICAL_W;
+    const cssH = cssW * (LOGICAL_H / LOGICAL_W);
+    mapCanvas.width = Math.round(cssW * dpr);
+    mapCanvas.height = Math.round(cssH * dpr);
+  }
+  window.addEventListener('resize', resizeMapCanvas);
+
+  function screenToLogical(cssX, cssY) {
+    const s = cssScale();
+    return { lx: (cssX / s - view.tx) / view.scale, ly: (cssY / s - view.ty) / view.scale };
+  }
+
+  function logicalToScreen(lx, ly) {
+    const s = cssScale();
+    return { x: s * (view.scale * lx + view.tx), y: s * (view.scale * ly + view.ty) };
+  }
+
+  function clampView() {
+    view.scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.scale));
+    const marginX = LOGICAL_W * 0.4;
+    view.tx = Math.min(marginX, Math.max(-(LOGICAL_W * view.scale) + LOGICAL_W - marginX, view.tx));
+    const marginY = LOGICAL_H * 0.4;
+    view.ty = Math.min(marginY, Math.max(-(LOGICAL_H * view.scale) + LOGICAL_H - marginY, view.ty));
+  }
+
+  function zoomAt(cssX, cssY, factor) {
+    const before = screenToLogical(cssX, cssY);
+    view.scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.scale * factor));
+    const s = cssScale();
+    view.tx = cssX / s - view.scale * before.lx;
+    view.ty = cssY / s - view.scale * before.ly;
+    clampView();
+  }
+
+  function resetView() {
+    view.scale = 1; view.tx = 0; view.ty = 0;
+  }
+
+  function canvasEventPos(evt) {
+    const rect = mapCanvas.getBoundingClientRect();
+    return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+  }
+
+  mapCanvas.addEventListener('wheel', (evt) => {
+    evt.preventDefault();
+    const pos = canvasEventPos(evt);
+    const factor = evt.deltaY < 0 ? 1.15 : 1 / 1.15;
+    zoomAt(pos.x, pos.y, factor);
+  }, { passive: false });
+
+  let dragAnchor = null;
+  let dragStartCss = null;
+  let dragMoved = false;
+
+  mapCanvas.addEventListener('mousedown', (evt) => {
+    const pos = canvasEventPos(evt);
+    dragAnchor = screenToLogical(pos.x, pos.y);
+    dragStartCss = pos;
+    dragMoved = false;
+    mapCanvas.style.cursor = 'grabbing';
+  });
+
+  window.addEventListener('mousemove', (evt) => {
+    if (!dragAnchor) return;
+    const pos = canvasEventPos(evt);
+    if (Math.hypot(pos.x - dragStartCss.x, pos.y - dragStartCss.y) > 4) dragMoved = true;
+    const s = cssScale();
+    view.tx = pos.x / s - view.scale * dragAnchor.lx;
+    view.ty = pos.y / s - view.scale * dragAnchor.ly;
+    clampView();
+  });
+
+  window.addEventListener('mouseup', (evt) => {
+    if (!dragAnchor) return;
+    if (!dragMoved) {
+      const pos = canvasEventPos(evt);
+      handleMapClick(pos.x, pos.y);
+    }
+    dragAnchor = null;
+    mapCanvas.style.cursor = 'grab';
+  });
+
+  function handleMapClick(cssX, cssY) {
+    const targets = [];
+    if (groundStation) targets.push({ kind: 'Ground station', lat: groundStation.lat, lon: groundStation.lon });
+    if (satTrack.length) {
+      const cur = satTrack[satTrack.length - 1];
+      targets.push({ kind: 'PWNCUBE', lat: cur.lat, lon: cur.lon });
+    }
+    const HIT_RADIUS_CSS = 12;
+    let best = null, bestDist = Infinity;
+    for (const t of targets) {
+      const logical = project(t.lat, t.lon);
+      const p = logicalToScreen(logical.x, logical.y);
+      const d = Math.hypot(p.x - cssX, p.y - cssY);
+      if (d < HIT_RADIUS_CSS && d < bestDist) { bestDist = d; best = t; }
+    }
+    if (best) { openLocationModal(best.kind, best.lat, best.lon); return; }
+    toggleMapExpand();
+  }
+
+  const mapPanelEl = document.querySelector('.map-panel');
+  const mapExpandBackdropEl = document.getElementById('mapExpandBackdrop');
+  let mapExpanded = false;
+
+  function toggleMapExpand() {
+    mapExpanded = !mapExpanded;
+    mapPanelEl.classList.toggle('expanded', mapExpanded);
+    mapExpandBackdropEl.classList.toggle('open', mapExpanded);
+    resizeMapCanvas();
+  }
+
+  function collapseMap() {
+    if (!mapExpanded) return;
+    mapExpanded = false;
+    mapPanelEl.classList.remove('expanded');
+    mapExpandBackdropEl.classList.remove('open');
+    resizeMapCanvas();
+  }
+
+  function drawMapBase() {
+    const w = mapBase.width, h = mapBase.height;
+    mapBaseCtx.clearRect(0, 0, w, h);
+
+    mapBaseCtx.fillStyle = '#150F1A';
+    mapBaseCtx.fillRect(0, 0, w, h);
+    mapBaseCtx.fillStyle = '#3A2E44';
+    mapBaseCtx.fill(worldLandPath2D);
+    mapBaseCtx.strokeStyle = 'rgba(156,143,166,0.25)';
+    mapBaseCtx.lineWidth = 0.75;
+    mapBaseCtx.stroke(worldLandPath2D);
+
+    mapBaseCtx.strokeStyle = 'rgba(156,143,166,0.12)';
+    mapBaseCtx.lineWidth = 1;
+    for (let lon = -180; lon <= 180; lon += 30) {
+      const x = project(0, lon).x;
+      mapBaseCtx.beginPath(); mapBaseCtx.moveTo(x, 0); mapBaseCtx.lineTo(x, h); mapBaseCtx.stroke();
+    }
+    for (let lat = -90; lat <= 90; lat += 30) {
+      const y = project(lat, 0).y;
+      mapBaseCtx.beginPath(); mapBaseCtx.moveTo(0, y); mapBaseCtx.lineTo(w, y); mapBaseCtx.stroke();
+    }
+
+    mapBaseCtx.strokeStyle = 'rgba(79,217,164,0.3)';
+    const eqY = project(0, 0).y, pmX = project(0, 0).x;
+    mapBaseCtx.beginPath(); mapBaseCtx.moveTo(0, eqY); mapBaseCtx.lineTo(w, eqY); mapBaseCtx.stroke();
+    mapBaseCtx.beginPath(); mapBaseCtx.moveTo(pmX, 0); mapBaseCtx.lineTo(pmX, h); mapBaseCtx.stroke();
+
+    mapBaseCtx.strokeStyle = 'rgba(156,143,166,0.35)';
+    mapBaseCtx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    mapBaseCtx.fillStyle = 'rgba(156,143,166,0.6)';
+    mapBaseCtx.font = '10px ui-monospace, monospace';
+    mapBaseCtx.fillText('-180', 4, h - 4);
+    mapBaseCtx.fillText('180', w - 24, h - 4);
+    mapBaseCtx.fillText('90N', 4, 12);
+    mapBaseCtx.fillText('90S', 4, h - 4 - 10);
+
+    if (groundStation) {
+      const p = project(groundStation.lat, groundStation.lon);
+      mapBaseCtx.strokeStyle = '#8FBF6B';
+      mapBaseCtx.lineWidth = 1.5;
+      mapBaseCtx.beginPath(); mapBaseCtx.moveTo(p.x - 7, p.y); mapBaseCtx.lineTo(p.x + 7, p.y); mapBaseCtx.stroke();
+      mapBaseCtx.beginPath(); mapBaseCtx.moveTo(p.x, p.y - 7); mapBaseCtx.lineTo(p.x, p.y + 7); mapBaseCtx.stroke();
+      mapBaseCtx.beginPath(); mapBaseCtx.arc(p.x, p.y, 4, 0, Math.PI * 2); mapBaseCtx.stroke();
+    }
+
+    if (satTrack.length > 0) {
+      for (let i = 1; i < satTrack.length; i++) {
+        const a = project(satTrack[i - 1].lat, satTrack[i - 1].lon);
+        const b = project(satTrack[i].lat, satTrack[i].lon);
+        if (Math.abs(b.x - a.x) > w / 2) continue;
+        const alpha = 0.08 + (i / satTrack.length) * 0.35;
+        mapBaseCtx.strokeStyle = `rgba(79,217,164,${alpha.toFixed(2)})`;
+        mapBaseCtx.lineWidth = 1.5;
+        mapBaseCtx.beginPath(); mapBaseCtx.moveTo(a.x, a.y); mapBaseCtx.lineTo(b.x, b.y); mapBaseCtx.stroke();
+      }
+      const cur = satTrack[satTrack.length - 1];
+      const p = project(cur.lat, cur.lon);
+      mapBaseCtx.fillStyle = 'rgba(79,217,164,0.25)';
+      mapBaseCtx.beginPath(); mapBaseCtx.arc(p.x, p.y, 8, 0, Math.PI * 2); mapBaseCtx.fill();
+      mapBaseCtx.fillStyle = '#4FD9A4';
+      mapBaseCtx.beginPath(); mapBaseCtx.arc(p.x, p.y, 3.5, 0, Math.PI * 2); mapBaseCtx.fill();
+    }
+  }
+
+  const mapReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let sweepAngle = 0;
+  function mapAnimFrame(ts) {
+    const physicalScale = mapCanvas.width / LOGICAL_W;
+    mapCtx.setTransform(1, 0, 0, 1, 0, 0);
+    mapCtx.clearRect(0, 0, mapCanvas.width, mapCanvas.height);
+    mapCtx.setTransform(physicalScale, 0, 0, physicalScale, 0, 0);
+    mapCtx.translate(view.tx, view.ty);
+    mapCtx.scale(view.scale, view.scale);
+    mapCtx.drawImage(mapBase, 0, 0);
+
+    if (!mapReducedMotion) {
+      const center = satTrack.length
+        ? project(satTrack[satTrack.length - 1].lat, satTrack[satTrack.length - 1].lon)
+        : { x: LOGICAL_W / 2, y: LOGICAL_H / 2 };
+
+      const lw = 1 / (physicalScale * view.scale);
+
+      sweepAngle += 0.02;
+      const R = 160;
+      for (let i = 0; i < 24; i++) {
+        const a = sweepAngle - i * 0.035;
+        const alpha = (1 - i / 24) * 0.16;
+        mapCtx.strokeStyle = `rgba(79,217,164,${alpha.toFixed(3)})`;
+        mapCtx.lineWidth = lw;
+        mapCtx.beginPath();
+        mapCtx.moveTo(center.x, center.y);
+        mapCtx.lineTo(center.x + Math.cos(a) * R, center.y + Math.sin(a) * R);
+        mapCtx.stroke();
+      }
+
+      if (satTrack.length) {
+        const pulse = 5 + Math.sin(ts / 350) * 3;
+        mapCtx.strokeStyle = 'rgba(79,217,164,0.35)';
+        mapCtx.lineWidth = lw;
+        mapCtx.beginPath(); mapCtx.arc(center.x, center.y, 9 + pulse, 0, Math.PI * 2); mapCtx.stroke();
+      }
+    }
+
+    requestAnimationFrame(mapAnimFrame);
+  }
+
+  resizeMapCanvas();
+  drawMapBase();
+  updateRadar(null, null, null);
+  requestAnimationFrame(mapAnimFrame);
+
+  // ---------- location detail modal ----------
+  // Same offline city DB as FlatSat's dashboard -- see index.html for full
+  // rationale (no network reverse-geocoding at runtime).
+  const CITY_DB = [
+    { n: 'New York', c: 'USA', lat: 40.7128, lon: -74.0060, tz: 'America/New_York' },
+    { n: 'Washington, D.C.', c: 'USA', lat: 38.9072, lon: -77.0369, tz: 'America/New_York' },
+    { n: 'Miami', c: 'USA', lat: 25.7617, lon: -80.1918, tz: 'America/New_York' },
+    { n: 'Chicago', c: 'USA', lat: 41.8781, lon: -87.6298, tz: 'America/Chicago' },
+    { n: 'Houston', c: 'USA', lat: 29.7604, lon: -95.3698, tz: 'America/Chicago' },
+    { n: 'Denver', c: 'USA', lat: 39.7392, lon: -104.9903, tz: 'America/Denver' },
+    { n: 'Las Vegas', c: 'USA', lat: 36.1699, lon: -115.1398, tz: 'America/Los_Angeles' },
+    { n: 'Los Angeles', c: 'USA', lat: 34.0522, lon: -118.2437, tz: 'America/Los_Angeles' },
+    { n: 'Seattle', c: 'USA', lat: 47.6062, lon: -122.3321, tz: 'America/Los_Angeles' },
+    { n: 'Anchorage', c: 'USA', lat: 61.2181, lon: -149.9003, tz: 'America/Anchorage' },
+    { n: 'Honolulu', c: 'USA', lat: 21.3069, lon: -157.8583, tz: 'Pacific/Honolulu' },
+    { n: 'Toronto', c: 'Canada', lat: 43.6532, lon: -79.3832, tz: 'America/Toronto' },
+    { n: 'Vancouver', c: 'Canada', lat: 49.2827, lon: -123.1207, tz: 'America/Vancouver' },
+    { n: 'Ottawa', c: 'Canada', lat: 45.4215, lon: -75.6972, tz: 'America/Toronto' },
+    { n: 'Mexico City', c: 'Mexico', lat: 19.4326, lon: -99.1332, tz: 'America/Mexico_City' },
+    { n: 'Guatemala City', c: 'Guatemala', lat: 14.6349, lon: -90.5069, tz: 'America/Guatemala' },
+    { n: 'Havana', c: 'Cuba', lat: 23.1136, lon: -82.3666, tz: 'America/Havana' },
+    { n: 'Panama City', c: 'Panama', lat: 8.9824, lon: -79.5199, tz: 'America/Panama' },
+    { n: 'San Jose', c: 'Costa Rica', lat: 9.9281, lon: -84.0907, tz: 'America/Costa_Rica' },
+    { n: 'Kingston', c: 'Jamaica', lat: 18.0179, lon: -76.8099, tz: 'America/Jamaica' },
+    { n: 'Nuuk', c: 'Greenland', lat: 64.1836, lon: -51.7214, tz: 'America/Nuuk' },
+    { n: 'Bogota', c: 'Colombia', lat: 4.7110, lon: -74.0721, tz: 'America/Bogota' },
+    { n: 'Caracas', c: 'Venezuela', lat: 10.4806, lon: -66.9036, tz: 'America/Caracas' },
+    { n: 'Lima', c: 'Peru', lat: -12.0464, lon: -77.0428, tz: 'America/Lima' },
+    { n: 'Quito', c: 'Ecuador', lat: -0.1807, lon: -78.4678, tz: 'America/Guayaquil' },
+    { n: 'La Paz', c: 'Bolivia', lat: -16.5000, lon: -68.1500, tz: 'America/La_Paz' },
+    { n: 'Santiago', c: 'Chile', lat: -33.4489, lon: -70.6693, tz: 'America/Santiago' },
+    { n: 'Ushuaia', c: 'Argentina', lat: -54.8019, lon: -68.3030, tz: 'America/Argentina/Ushuaia' },
+    { n: 'Buenos Aires', c: 'Argentina', lat: -34.6037, lon: -58.3816, tz: 'America/Argentina/Buenos_Aires' },
+    { n: 'Montevideo', c: 'Uruguay', lat: -34.9011, lon: -56.1645, tz: 'America/Montevideo' },
+    { n: 'Asuncion', c: 'Paraguay', lat: -25.2637, lon: -57.5759, tz: 'America/Asuncion' },
+    { n: 'Brasilia', c: 'Brazil', lat: -15.8267, lon: -47.9218, tz: 'America/Sao_Paulo' },
+    { n: 'Sao Paulo', c: 'Brazil', lat: -23.5505, lon: -46.6333, tz: 'America/Sao_Paulo' },
+    { n: 'Rio de Janeiro', c: 'Brazil', lat: -22.9068, lon: -43.1729, tz: 'America/Sao_Paulo' },
+    { n: 'Manaus', c: 'Brazil', lat: -3.1190, lon: -60.0217, tz: 'America/Manaus' },
+    { n: 'London', c: 'UK', lat: 51.5074, lon: -0.1278, tz: 'Europe/London' },
+    { n: 'Dublin', c: 'Ireland', lat: 53.3498, lon: -6.2603, tz: 'Europe/Dublin' },
+    { n: 'Reykjavik', c: 'Iceland', lat: 64.1466, lon: -21.9426, tz: 'Atlantic/Reykjavik' },
+    { n: 'Lisbon', c: 'Portugal', lat: 38.7223, lon: -9.1393, tz: 'Europe/Lisbon' },
+    { n: 'Madrid', c: 'Spain', lat: 40.4168, lon: -3.7038, tz: 'Europe/Madrid' },
+    { n: 'Paris', c: 'France', lat: 48.8566, lon: 2.3522, tz: 'Europe/Paris' },
+    { n: 'Brussels', c: 'Belgium', lat: 50.8503, lon: 4.3517, tz: 'Europe/Brussels' },
+    { n: 'Amsterdam', c: 'Netherlands', lat: 52.3676, lon: 4.9041, tz: 'Europe/Amsterdam' },
+    { n: 'Berlin', c: 'Germany', lat: 52.5200, lon: 13.4050, tz: 'Europe/Berlin' },
+    { n: 'Zurich', c: 'Switzerland', lat: 47.3769, lon: 8.5417, tz: 'Europe/Zurich' },
+    { n: 'Vienna', c: 'Austria', lat: 48.2082, lon: 16.3738, tz: 'Europe/Vienna' },
+    { n: 'Rome', c: 'Italy', lat: 41.9028, lon: 12.4964, tz: 'Europe/Rome' },
+    { n: 'Stockholm', c: 'Sweden', lat: 59.3293, lon: 18.0686, tz: 'Europe/Stockholm' },
+    { n: 'Oslo', c: 'Norway', lat: 59.9139, lon: 10.7522, tz: 'Europe/Oslo' },
+    { n: 'Copenhagen', c: 'Denmark', lat: 55.6761, lon: 12.5683, tz: 'Europe/Copenhagen' },
+    { n: 'Helsinki', c: 'Finland', lat: 60.1699, lon: 24.9384, tz: 'Europe/Helsinki' },
+    { n: 'Longyearbyen', c: 'Svalbard', lat: 78.2232, lon: 15.6267, tz: 'Arctic/Longyearbyen' },
+    { n: 'Warsaw', c: 'Poland', lat: 52.2297, lon: 21.0122, tz: 'Europe/Warsaw' },
+    { n: 'Prague', c: 'Czechia', lat: 50.0755, lon: 14.4378, tz: 'Europe/Prague' },
+    { n: 'Budapest', c: 'Hungary', lat: 47.4979, lon: 19.0402, tz: 'Europe/Budapest' },
+    { n: 'Athens', c: 'Greece', lat: 37.9838, lon: 23.7275, tz: 'Europe/Athens' },
+    { n: 'Bucharest', c: 'Romania', lat: 44.4268, lon: 26.1025, tz: 'Europe/Bucharest' },
+    { n: 'Sofia', c: 'Bulgaria', lat: 42.6977, lon: 23.3219, tz: 'Europe/Sofia' },
+    { n: 'Belgrade', c: 'Serbia', lat: 44.7866, lon: 20.4489, tz: 'Europe/Belgrade' },
+    { n: 'Kyiv', c: 'Ukraine', lat: 50.4501, lon: 30.5234, tz: 'Europe/Kyiv' },
+    { n: 'Minsk', c: 'Belarus', lat: 53.9006, lon: 27.5590, tz: 'Europe/Minsk' },
+    { n: 'Riga', c: 'Latvia', lat: 56.9496, lon: 24.1052, tz: 'Europe/Riga' },
+    { n: 'Vilnius', c: 'Lithuania', lat: 54.6872, lon: 25.2797, tz: 'Europe/Vilnius' },
+    { n: 'Tallinn', c: 'Estonia', lat: 59.4370, lon: 24.7536, tz: 'Europe/Tallinn' },
+    { n: 'Moscow', c: 'Russia', lat: 55.7558, lon: 37.6173, tz: 'Europe/Moscow' },
+    { n: 'Saint Petersburg', c: 'Russia', lat: 59.9311, lon: 30.3609, tz: 'Europe/Moscow' },
+    { n: 'Novosibirsk', c: 'Russia', lat: 55.0084, lon: 82.9357, tz: 'Asia/Novosibirsk' },
+    { n: 'Vladivostok', c: 'Russia', lat: 43.1332, lon: 131.9113, tz: 'Asia/Vladivostok' },
+    { n: 'Cairo', c: 'Egypt', lat: 30.0444, lon: 31.2357, tz: 'Africa/Cairo' },
+    { n: 'Lagos', c: 'Nigeria', lat: 6.5244, lon: 3.3792, tz: 'Africa/Lagos' },
+    { n: 'Nairobi', c: 'Kenya', lat: -1.2921, lon: 36.8219, tz: 'Africa/Nairobi' },
+    { n: 'Addis Ababa', c: 'Ethiopia', lat: 9.0250, lon: 38.7469, tz: 'Africa/Addis_Ababa' },
+    { n: 'Johannesburg', c: 'South Africa', lat: -26.2041, lon: 28.0473, tz: 'Africa/Johannesburg' },
+    { n: 'Cape Town', c: 'South Africa', lat: -33.9249, lon: 18.4241, tz: 'Africa/Johannesburg' },
+    { n: 'Casablanca', c: 'Morocco', lat: 33.5731, lon: -7.5898, tz: 'Africa/Casablanca' },
+    { n: 'Algiers', c: 'Algeria', lat: 36.7538, lon: 3.0588, tz: 'Africa/Algiers' },
+    { n: 'Tunis', c: 'Tunisia', lat: 36.8065, lon: 10.1815, tz: 'Africa/Tunis' },
+    { n: 'Accra', c: 'Ghana', lat: 5.6037, lon: -0.1870, tz: 'Africa/Accra' },
+    { n: 'Dakar', c: 'Senegal', lat: 14.7167, lon: -17.4677, tz: 'Africa/Dakar' },
+    { n: 'Kinshasa', c: 'DR Congo', lat: -4.4419, lon: 15.2663, tz: 'Africa/Kinshasa' },
+    { n: 'Luanda', c: 'Angola', lat: -8.8390, lon: 13.2894, tz: 'Africa/Luanda' },
+    { n: 'Khartoum', c: 'Sudan', lat: 15.5007, lon: 32.5599, tz: 'Africa/Khartoum' },
+    { n: 'Dar es Salaam', c: 'Tanzania', lat: -6.7924, lon: 39.2083, tz: 'Africa/Dar_es_Salaam' },
+    { n: 'Kampala', c: 'Uganda', lat: 0.3476, lon: 32.5825, tz: 'Africa/Kampala' },
+    { n: 'Istanbul', c: 'Turkey', lat: 41.0082, lon: 28.9784, tz: 'Europe/Istanbul' },
+    { n: 'Ankara', c: 'Turkey', lat: 39.9334, lon: 32.8597, tz: 'Europe/Istanbul' },
+    { n: 'Tel Aviv', c: 'Israel', lat: 32.0853, lon: 34.7818, tz: 'Asia/Jerusalem' },
+    { n: 'Amman', c: 'Jordan', lat: 31.9454, lon: 35.9284, tz: 'Asia/Amman' },
+    { n: 'Beirut', c: 'Lebanon', lat: 33.8938, lon: 35.5018, tz: 'Asia/Beirut' },
+    { n: 'Damascus', c: 'Syria', lat: 33.5138, lon: 36.2765, tz: 'Asia/Damascus' },
+    { n: 'Baghdad', c: 'Iraq', lat: 33.3152, lon: 44.3661, tz: 'Asia/Baghdad' },
+    { n: 'Tehran', c: 'Iran', lat: 35.6892, lon: 51.3890, tz: 'Asia/Tehran' },
+    { n: 'Riyadh', c: 'Saudi Arabia', lat: 24.7136, lon: 46.6753, tz: 'Asia/Riyadh' },
+    { n: 'Jeddah', c: 'Saudi Arabia', lat: 21.4858, lon: 39.1925, tz: 'Asia/Riyadh' },
+    { n: 'Dubai', c: 'UAE', lat: 25.2048, lon: 55.2708, tz: 'Asia/Dubai' },
+    { n: 'Doha', c: 'Qatar', lat: 25.2854, lon: 51.5310, tz: 'Asia/Qatar' },
+    { n: 'Kuwait City', c: 'Kuwait', lat: 29.3759, lon: 47.9774, tz: 'Asia/Kuwait' },
+    { n: 'Muscat', c: 'Oman', lat: 23.5859, lon: 58.4059, tz: 'Asia/Muscat' },
+    { n: 'Karachi', c: 'Pakistan', lat: 24.8607, lon: 67.0011, tz: 'Asia/Karachi' },
+    { n: 'Islamabad', c: 'Pakistan', lat: 33.6844, lon: 73.0479, tz: 'Asia/Karachi' },
+    { n: 'New Delhi', c: 'India', lat: 28.6139, lon: 77.2090, tz: 'Asia/Kolkata' },
+    { n: 'Mumbai', c: 'India', lat: 19.0760, lon: 72.8777, tz: 'Asia/Kolkata' },
+    { n: 'Bengaluru', c: 'India', lat: 12.9716, lon: 77.5946, tz: 'Asia/Kolkata' },
+    { n: 'Kolkata', c: 'India', lat: 22.5726, lon: 88.3639, tz: 'Asia/Kolkata' },
+    { n: 'Chennai', c: 'India', lat: 13.0827, lon: 80.2707, tz: 'Asia/Kolkata' },
+    { n: 'Dhaka', c: 'Bangladesh', lat: 23.8103, lon: 90.4125, tz: 'Asia/Dhaka' },
+    { n: 'Kathmandu', c: 'Nepal', lat: 27.7172, lon: 85.3240, tz: 'Asia/Kathmandu' },
+    { n: 'Colombo', c: 'Sri Lanka', lat: 6.9271, lon: 79.8612, tz: 'Asia/Colombo' },
+    { n: 'Kabul', c: 'Afghanistan', lat: 34.5553, lon: 69.2075, tz: 'Asia/Kabul' },
+    { n: 'Tashkent', c: 'Uzbekistan', lat: 41.2995, lon: 69.2401, tz: 'Asia/Tashkent' },
+    { n: 'Almaty', c: 'Kazakhstan', lat: 43.2220, lon: 76.8512, tz: 'Asia/Almaty' },
+    { n: 'Astana', c: 'Kazakhstan', lat: 51.1694, lon: 71.4491, tz: 'Asia/Almaty' },
+    { n: 'Beijing', c: 'China', lat: 39.9042, lon: 116.4074, tz: 'Asia/Shanghai' },
+    { n: 'Shanghai', c: 'China', lat: 31.2304, lon: 121.4737, tz: 'Asia/Shanghai' },
+    { n: 'Guangzhou', c: 'China', lat: 23.1291, lon: 113.2644, tz: 'Asia/Shanghai' },
+    { n: 'Chengdu', c: 'China', lat: 30.5728, lon: 104.0668, tz: 'Asia/Shanghai' },
+    { n: 'Urumqi', c: 'China', lat: 43.8256, lon: 87.6168, tz: 'Asia/Shanghai' },
+    { n: 'Hong Kong', c: 'China', lat: 22.3193, lon: 114.1694, tz: 'Asia/Hong_Kong' },
+    { n: 'Taipei', c: 'Taiwan', lat: 25.0330, lon: 121.5654, tz: 'Asia/Taipei' },
+    { n: 'Tokyo', c: 'Japan', lat: 35.6762, lon: 139.6503, tz: 'Asia/Tokyo' },
+    { n: 'Osaka', c: 'Japan', lat: 34.6937, lon: 135.5023, tz: 'Asia/Tokyo' },
+    { n: 'Seoul', c: 'South Korea', lat: 37.5665, lon: 126.9780, tz: 'Asia/Seoul' },
+    { n: 'Pyongyang', c: 'North Korea', lat: 39.0392, lon: 125.7625, tz: 'Asia/Pyongyang' },
+    { n: 'Ulaanbaatar', c: 'Mongolia', lat: 47.8864, lon: 106.9057, tz: 'Asia/Ulaanbaatar' },
+    { n: 'Bangkok', c: 'Thailand', lat: 13.7563, lon: 100.5018, tz: 'Asia/Bangkok' },
+    { n: 'Hanoi', c: 'Vietnam', lat: 21.0278, lon: 105.8342, tz: 'Asia/Ho_Chi_Minh' },
+    { n: 'Ho Chi Minh City', c: 'Vietnam', lat: 10.8231, lon: 106.6297, tz: 'Asia/Ho_Chi_Minh' },
+    { n: 'Phnom Penh', c: 'Cambodia', lat: 11.5564, lon: 104.9282, tz: 'Asia/Phnom_Penh' },
+    { n: 'Vientiane', c: 'Laos', lat: 17.9757, lon: 102.6331, tz: 'Asia/Vientiane' },
+    { n: 'Yangon', c: 'Myanmar', lat: 16.8409, lon: 96.1735, tz: 'Asia/Yangon' },
+    { n: 'Kuala Lumpur', c: 'Malaysia', lat: 3.1390, lon: 101.6869, tz: 'Asia/Kuala_Lumpur' },
+    { n: 'Singapore', c: 'Singapore', lat: 1.3521, lon: 103.8198, tz: 'Asia/Singapore' },
+    { n: 'Jakarta', c: 'Indonesia', lat: -6.2088, lon: 106.8456, tz: 'Asia/Jakarta' },
+    { n: 'Surabaya', c: 'Indonesia', lat: -7.2575, lon: 112.7521, tz: 'Asia/Jakarta' },
+    { n: 'Manila', c: 'Philippines', lat: 14.5995, lon: 120.9842, tz: 'Asia/Manila' },
+    { n: 'Bandar Seri Begawan', c: 'Brunei', lat: 4.9031, lon: 114.9398, tz: 'Asia/Brunei' },
+    { n: 'Dili', c: 'Timor-Leste', lat: -8.5569, lon: 125.5603, tz: 'Asia/Dili' },
+    { n: 'Sydney', c: 'Australia', lat: -33.8688, lon: 151.2093, tz: 'Australia/Sydney' },
+    { n: 'Melbourne', c: 'Australia', lat: -37.8136, lon: 144.9631, tz: 'Australia/Melbourne' },
+    { n: 'Brisbane', c: 'Australia', lat: -27.4698, lon: 153.0251, tz: 'Australia/Brisbane' },
+    { n: 'Perth', c: 'Australia', lat: -31.9505, lon: 115.8605, tz: 'Australia/Perth' },
+    { n: 'Adelaide', c: 'Australia', lat: -34.9285, lon: 138.6007, tz: 'Australia/Adelaide' },
+    { n: 'Darwin', c: 'Australia', lat: -12.4634, lon: 130.8456, tz: 'Australia/Darwin' },
+    { n: 'Auckland', c: 'New Zealand', lat: -36.8485, lon: 174.7633, tz: 'Pacific/Auckland' },
+    { n: 'Suva', c: 'Fiji', lat: -18.1416, lon: 178.4419, tz: 'Pacific/Fiji' },
+    { n: 'Port Moresby', c: 'Papua New Guinea', lat: -9.4438, lon: 147.1803, tz: 'Pacific/Port_Moresby' },
+    { n: "Nuku'alofa", c: 'Tonga', lat: -21.1393, lon: -175.2049, tz: 'Pacific/Tongatapu' },
+    { n: 'Apia', c: 'Samoa', lat: -13.8506, lon: -171.7513, tz: 'Pacific/Apia' },
+    { n: 'Noumea', c: 'New Caledonia', lat: -22.2758, lon: 166.4581, tz: 'Pacific/Noumea' },
+    { n: 'McMurdo Station', c: 'Antarctica', lat: -77.8419, lon: 166.6863, tz: 'Pacific/Auckland' },
+  ];
+
+  function haversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const toRad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * toRad;
+    const dLon = (lon2 - lon1) * toRad;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function nearestCity(lat, lon) {
+    let best = null, bestDist = Infinity;
+    for (const city of CITY_DB) {
+      const d = haversineKm(lat, lon, city.lat, city.lon);
+      if (d < bestDist) { bestDist = d; best = city; }
+    }
+    return { city: best, distanceKm: bestDist };
+  }
+
+  let locModalClockInterval = null;
+
+  function updateLocModalClock(tz) {
+    const now = new Date();
+    const timeFmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const offsetFmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'shortOffset' });
+    const offsetPart = offsetFmt.formatToParts(now).find((p) => p.type === 'timeZoneName');
+    document.getElementById('locModalTime').textContent = timeFmt.format(now);
+    document.getElementById('locModalOffset').textContent = offsetPart ? `${offsetPart.value} · ${tz}` : tz;
+  }
+
+  function openLocationModal(kind, lat, lon) {
+    const { city, distanceKm } = nearestCity(lat, lon);
+    document.getElementById('locModalKind').textContent = kind;
+    document.getElementById('locModalCoords').textContent = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    document.getElementById('locModalCity').textContent = `${city.n}, ${city.c}`;
+    document.getElementById('locModalDistance').textContent =
+      `${distanceKm < 1 ? '<1' : Math.round(distanceKm).toLocaleString()} km away`;
+    document.getElementById('locModalTz').textContent = city.tz;
+    updateLocModalClock(city.tz);
+    clearInterval(locModalClockInterval);
+    locModalClockInterval = setInterval(() => updateLocModalClock(city.tz), 1000);
+    document.getElementById('locModal').classList.add('open');
+  }
+
+  function closeLocationModal() {
+    document.getElementById('locModal').classList.remove('open');
+    clearInterval(locModalClockInterval);
+  }
+
+  window.addEventListener('keydown', (evt) => {
+    if (evt.key === 'Escape') { closeLocationModal(); collapseMap(); }
+  });
+
+  function appendLog(tag, text) {
+    const list = document.getElementById('logList');
+    const line = document.createElement('div');
+    line.innerHTML = `<span class="tag ${tag}">${tag}</span>${text}`;
+    list.prepend(line);
+    while (list.children.length > 200) list.removeChild(list.lastChild);
+  }
+
+  function connectWs() {
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'link_state') {
+        renderEffects(msg);
+        appendLog('link_state', `${msg.state}`);
+      } else if (msg.type === 'telemetry') {
+        appendLog('telemetry', `${msg.apid_name} seq=${msg.seq} ${JSON.stringify(msg.fields)}`);
+        recordRx();
+        apidCounts[msg.apid_name] = (apidCounts[msg.apid_name] || 0) + 1;
+        if (msg.apid_name === 'SEND_TM') renderSensors(msg.fields);
+        if (msg.apid_name === 'STATUS') renderMission(msg.fields);
+        if (msg.apid_name === 'NAV') renderNav(msg.fields);
+        if (msg.apid_name === 'GS_STATUS' || msg.apid_name === 'GS_MODE') {
+          renderGs(msg.apid_name, msg.fields);
+        }
+        if (msg.apid_name === 'GS_ACCESS') renderGsHandshake(msg.fields);
+        if (msg.apid_name === 'PAYLOAD_STATUS') renderPayload(msg.fields);
+      } else if (msg.type === 'command_sent') {
+        appendLog('command_sent', `${msg.apid_name} ${msg.correlation_id}`);
+      } else if (msg.type === 'decode_error') {
+        appendLog('decode_error', msg.reason);
+      }
+    };
+    ws.onclose = () => setTimeout(connectWs, 2000);
+  }
+
+  async function sendCommand(command, args) {
+    const res = await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // PWNCUBE does not implement FlatSat's AES-ECB scheme -- forcing
+      // encrypt:false here is what keeps this panel from silently sending
+      // corrupted (AES-ciphertext-as-plaintext) commands to the board.
+      body: JSON.stringify({ command, args: args || {}, encrypt: false }),
+    });
+    if (!res.ok) appendLog('decode_error', await res.text());
+  }
+
+  let supportsTx = false;
+  let gsHandshakeAutoFetched = false;
+
+  // PWNCUBE's firmware only replies with NAV (0x0B) as a one-shot,
+  // synchronous echo of the GPS_OVERRIDE TC itself -- there is no separate
+  // "read current override state" command, and unlike STATUS/GS_STATUS
+  // this frame is never re-transmitted on its own. If that single RF
+  // packet gets lost, click the button again (idempotent, no side effect).
+  //
+  // Deliberately NOT auto-sent or auto-repeated from this dashboard (an
+  // earlier version of this file did both, and it was a real bug: gate_open
+  // is recomputed live from the CURRENT gps position on every GS_STATUS read
+  // -- gs_gps_usable() && gs_within_range() && gs_session_active(), see
+  // command_service.c -- so a periodic resend of THIS panel's own baseline
+  // coordinates was silently overwriting whatever position an external GPS-
+  // spoofing or ground-station-auth attack script had just injected from
+  // outside this dashboard, every 20s, forever. Matches FlatSat's own
+  // proven demo flow exactly: GPS/GS_STATUS there is 100% manual too --
+  // this dashboard only ever reflects whatever position was last set, by
+  // whoever last set it (this button, or an external attack script), and
+  // never fights back.
+  function sendGpsOverride() {
+    sendCommand('gps-override', {
+      gps_lat_deg: numVal('gpsOverrideLat'),
+      gps_lon_deg: numVal('gpsOverrideLon'),
+      gps_alt_m: numVal('gpsOverrideAlt'),
+      gps_sats: numVal('gpsOverrideSats'),
+    });
+  }
+
+  async function loadStatus() {
+    const res = await fetch('/api/status');
+    if (res.status === 401) { window.location.href = '/login'; return; }
+    const data = await res.json();
+    document.getElementById('transportText').textContent = 'transport: ' + (data.transport || '--');
+    document.getElementById('opsPanel').classList.toggle('no-tx', !data.supports_tx);
+    supportsTx = !!data.supports_tx;
+    renderTransportSwitch(data);
+
+    // GS_ACCESS mutates firmware state (issues a fresh challenge each
+    // time), so it's fetched exactly once per page load instead of
+    // periodically polled like STATUS/GS_STATUS/PAYLOAD_STATUS below --
+    // same reasoning as FlatSat's dashboard. Will show "GS ACCESS GPS" /
+    // "GS RANGE LOCK" until a fake GPS fix has been injected via
+    // GPS_OVERRIDE -- that's the real prerequisite chain, not a bug.
+    if (supportsTx && !gsHandshakeAutoFetched) {
+      gsHandshakeAutoFetched = true;
+      sendCommand('gs-auth', { handshake: 'start' });
+    }
+  }
+
+  // ---------- transport switch (view radio or USB, independent of which
+  // one commands actually go out on -- see backend/app.py's _tx_transport) ----------
+  function renderTransportSwitch(data) {
+    const sources = data.sources || {};
+    document.querySelectorAll('#transportSwitch .xswitch-btn').forEach((btn) => {
+      const src = btn.dataset.source;
+      const info = sources[src];
+      btn.classList.toggle('active', data.active_source === src);
+      btn.classList.toggle('src-connected', !!(info && info.connected));
+      btn.disabled = !info;
+      btn.title = info ? info.description : `${src} not configured on this instance`;
+    });
+  }
+
+  async function switchTransport(source) {
+    const res = await fetch('/api/transport', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+    if (!res.ok) { appendLog('decode_error', await res.text()); return; }
+    loadStatus();
+  }
+
+  connectWs();
+  loadStatus();
+  setInterval(loadStatus, 5000);
+
+  // STATUS, GS_STATUS, and PAYLOAD_STATUS are all pure read/report
+  // commands on this firmware (no state mutation) -- safe to poll
+  // periodically so their panels stay populated without an operator
+  // pressing anything, same pattern as FlatSat's dashboard. GS_ACCESS is
+  // deliberately NOT in this set (see loadStatus()'s one-time fetch
+  // above) since it issues a fresh challenge every call. Staggered so
+  // they don't all land in the same USB write.
+  setInterval(() => { if (supportsTx) sendCommand('status'); }, 12000);
+  setInterval(() => { if (supportsTx) sendCommand('gs-status'); }, 15000);
+  setInterval(() => { if (supportsTx) sendCommand('payload-status'); }, 18000);
+  // No periodic gps-override resend here -- see sendGpsOverride()'s own
+  // comment for why that was removed (it fought with external attack
+  // scripts). GPS_OVERRIDE is manual-only: click the button, or run an
+  // attack script -- either way this dashboard just reflects whatever the
+  // board's current position is, via the gs-status/status polling above.
+</script>
+</body>
+</html>

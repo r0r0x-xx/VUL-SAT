@@ -1,0 +1,326 @@
+PWNSAT -- ATTACK 00: APID ENUMERATION (black-box recon over radio)
+====================================================================
+
+WHAT IT DOES
+--------
+Sweeps a range of APIDs (default 0x00-0x14), sending over HackRF a small
+telecommand with an encrypted garbage payload (there's no MAC/integrity,
+see attack 01 -- garbage ciphertext "decrypts fine" just as well as far
+as the firmware is concerned) to each APID, and listens for the response
+over radio with a second device dedicated to RX (RTL-SDR or CatSniffer
+v2, see below). The firmware ALWAYS answers with a structurally valid
+packet, even if the APID doesn't exist: the final handler in
+commandApidHandler prints "[ERROR] Unknown APID" and sends back an ERROR
+TM (APID 0x009). That gives three possible outcomes per APID:
+  - decoded TM with APID != 0x009 -> real, implemented command
+  - decoded TM with APID == 0x009 (ERROR) -> APID valid as a *range*, but
+    this specific value isn't implemented
+  - nothing decoded in the window -> RF noise (retry), or the command DID
+    arrive but doesn't generate a radio response (see note below)
+
+This is the recon step a black-box attacker needs before attack 03
+(command injection) or 02 (fuzzing crash): neither of those is armable
+without first knowing that APID 0x04 is SET_THRUSTER or that 0x06
+exists. Related findings: no rate-limiting on the uplink, recon APIDs
+respond without authentication, and no TC/TM type check.
+
+IMPORTANT -- "no response" doesn't always mean "the APID doesn't exist":
+several legitimate commands (confirmed by reading worker.cpp) change
+state and log over serial but NEVER call dispatchTelemetryPacket, i.e.
+they NEVER send a TM over radio -- confirmed in this session for
+SET_THRUSTER (0x04) and SET_BEACON_RATE (0x05). A "no response" in the
+sweep is inconclusive unless it's already been confirmed some other way
+(like these two) that this command never answers by design.
+
+REAL DANGER FOUND IN THIS SESSION -- SET_BEACON_RATE=0 FLOODS THE
+DOWNLINK (finding #18)
+------------------------------------------------------------------------
+The original probe payload (4 bytes of zeros) meant that, when it hit
+APID 0x005 (SET_BEACON_RATE), the firmware interpreted byte[0]=0 as
+"beacon interval = 0 seconds." worker.cpp does
+`t_radio_beacon.interval = b_seconds * 1000` with no minimum -- with
+interval=0, the main loop's condition
+(`millis() - previous > interval`) is practically always true, and the
+FlatSat is left transmitting beacons nonstop (same effect as finding
+#18, "beacon-flood," already documented in C3 itself). We hit this
+TWICE in this session before finding the cause -- it looked like an
+electrical problem (white "TX successful" LED blinking nonstop, console
+flooded with "[TM - SPP] APID=0x001...") until the line "[TC - SPP]
+APID=0x005 SEQ=..." was spotted right before the flood in the log. The
+only fix was to physically power-cycle and reconnect the FlatSat.
+
+FIX ALREADY APPLIED: PROBE_PAYLOAD is now 4 bytes of 0x01 (not 0x00) --
+on SET_BEACON_RATE that sets a 1-second interval, harmless. No extra
+care is needed on your part for this, it's already handled in the
+script -- documented here so that if PROBE_PAYLOAD is ever changed by
+hand, this isn't accidentally reintroduced.
+
+WHY TWO RADIOS (HackRF + DEDICATED RX) AND NOT JUST THE HackRF
+---------------------------------------------------------------
+The initial version used a single HackRF (transmit, then switch to
+receive). Confirmed in this session (2026-07-17) that this does NOT work
+reliably: the FlatSat answers within ~11ms of receiving the command
+(measured on the debug console -- the "[TC - SPP]" and "[TM - SPP]"
+lines are 11ms apart), but closing `hackrf_transfer -t` and opening a
+fresh `hackrf_transfer -r` (reopening the USB device + retuning) takes
+well over 100ms each time -- confirmed with 4 consecutive retries, 0
+captures. This is a deterministic hardware gap, not RF noise, so retries
+alone don't fix it.
+
+The solution: a second radio dedicated to RX that never has to switch
+modes, running continuously while the HackRF is dedicated purely to
+transmitting. Two implementations, selectable with --rx-device:
+
+  --rx-device catsniffer (lib/pwnsat_catsniffer_rx.py)
+    A CatSniffer v2 (Electronic Cats, SX1262) running the "LoRa Sniffer
+    CLI" firmware -- controlled over serial (auto-detected by USB
+    descriptor), tuned the same as the real downlink (New-firmware/
+    rdownlink.h: 916MHz, BW250, SF7, CR4/5, sync word 0x12). Reports
+    RSSI/SNR per packet (useful for telling apart leakage from our own
+    TX vs. a real response). CONFIRMED WORKING in this session (real
+    response to an unimplemented APID, 39ms after TX, SNR ~12dB) -- but
+    the two CatSniffers available that night both ended up failing at
+    the hardware level (stopped showing up on USB entirely, not even in
+    `ioreg`, despite several cable/port/antenna swaps) and couldn't be
+    used for the final sweep.
+
+  --rx-device rtlsdr (lib/pwnsat_rtlsdr_rx.py) -- CURRENT DEFAULT
+    Uses the RTL-SDR normally dedicated to PWNSAT-C3 (see
+    project_defcon_demo_hardware memory), running the same live GNU
+    Radio flowgraph already used by 01_eavesdropping/pwnsat_lora_rx.py
+    and C3's original bridge -- same principle of "second dedicated
+    radio, continuous RX," just a different physical device. Since the
+    RTL-SDR can't be in two places at once, C3 (and its own RTL-SDR
+    bridge) MUST BE SHUT DOWN before running this attack. No per-packet
+    RSSI/SNR (the flowgraph doesn't expose it over the ZMQ we use) --
+    detecting our own TX leakage is done 100% by packet type (see
+    below), not by SNR.
+
+CONFIRMED ON REAL HARDWARE, 2026-07-17, VIA RTL-SDR: full sweep 0x00-0x14
+(minus RESETC/BROADCAST_MSG) resolved 17 of 19 APIDs -- see FINAL
+CATALOG below.
+
+HOW LEAKAGE FROM OUR OWN TRANSMISSION IS RULED OUT
+---------------------------------------------------------------
+Our own uplink TX (918MHz) leaks into the downlink receiver (916MHz,
+only 2MHz apart) and sometimes the LoRa demodulator decodes it as if it
+were a real packet -- a frame like that has the SAME APID we're probing
+(obviously, we set it ourselves), so comparing it against the probed
+APID alone isn't enough to rule it out. The real distinguishing factor
+is the packet type bit: the FlatSat ALWAYS responds with a TM (type=0);
+a leaked frame from our own probe is ALWAYS a TC (type=1) --
+00_recon_apid_enum.py discards any TC frame unconditionally, no matter
+how clean it looks. With --rx-device catsniffer, there's an ADDITIONAL
+SNR filter (--min-snr, leakage measured ~-1 to -3dB, real responses
+~11-12dB) as an extra layer; with rtlsdr there's no SNR available and
+the packet-type filter is the only defense (already proven sufficient).
+
+FILES INVOLVED
+----------------------
+- attacks/00_recon_apid_enum/00_recon_apid_enum.py  <- the script that gets run
+- lib/pwnsat_packets.py                             <- builds the SPP packet (not run directly)
+- lib/pwnsat_lora_tx.py                             <- transmits over HackRF (not run directly)
+- lib/pwnsat_catsniffer_rx.py                       <- RX via CatSniffer (not run directly)
+- lib/pwnsat_rtlsdr_rx.py                           <- RX via RTL-SDR, imports PwnsatLoraRX from
+                                                        attacks/01_eavesdropping/pwnsat_lora_rx.py
+- lib/require_gnuradio.py                           <- environment check (not run directly)
+
+HARDWARE ASSIGNMENT
+------------------------
+This is the ONLY attack in this dossier that uses THREE distinct
+devices (though only two at a time):
+- HackRF: transmits the probe (918MHz uplink), always. If
+  01_eavesdropping is listening with the HackRF, close it first.
+- Dedicated RX -- one of the two:
+  - RTL-SDR (--rx-device rtlsdr, default): the same one normally
+    dedicated to PWNSAT-C3. C3 MUST BE SHUT DOWN first (and its
+    gradio/pwnsat_rx_bridge.py if running separately) -- they can't
+    share the device.
+  - CatSniffer v2 (--rx-device catsniffer): auto-detected over USB,
+    doesn't interfere with C3 or the RTL-SDR. Preferable IF it's
+    healthy -- reports RSSI/SNR and doesn't require touching C3.
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+ONE for the sweep itself. If you're going to use --rx-device rtlsdr,
+shut down C3 first (another terminal, or the same process that has it
+running).
+
+PREREQUISITES
+---------------
+- Homebrew Python with GNU Radio (see ../PWNSAT-C3-Release/INSTALL.md).
+- HackRF connected, with antenna, free.
+- If you're going to use RTL-SDR: PWNSAT-C3 (uvicorn) and its radio
+  bridge STOPPED -- the RTL-SDR can't be shared.
+- If you're going to use CatSniffer: connected over USB, "LoRa Sniffer
+  CLI" firmware already loaded (confirmed in this session).
+- The FlatSat powered on.
+
+DOES IT REQUIRE INTERACTIVE INPUT?
+-----------------------------
+No. A single command with flags runs the whole sweep and exits.
+
+COMMAND
+-------
+Terminal 1 (shut down C3 first if you're going to use RTL-SDR):
+
+    pkill -f "uvicorn backend.app:app"
+    pkill -f "gradio/pwnsat_rx_bridge.py"
+
+    cd attacks/00_recon_apid_enum
+    ./00_recon_apid_enum.py --skip 2 6
+
+Full command, with all flags explicit (the one used for the final
+catalog):
+
+    /opt/homebrew/bin/python3 00_recon_apid_enum.py --start 0 --end 0x14 \
+        --skip 2 6 --seq 1 --retries 3 --listen-seconds 1.0 \
+        --tx-gain 20 --rx-device rtlsdr --rx-gain 30 \
+        2>&1 | tee sweep_resultados.log
+
+ALL FLAGS, EXPLAINED
+------------------------------
+- --start 0 -> first APID of the sweep (0x00). Default 0x00.
+- --end 0x14 -> last APID of the sweep, inclusive (0x14 = 20 decimal,
+  covers every APID named in pwnsat_tools/spp_tools.py). Default
+  0x14.
+- --skip 2 6 -> APIDs excluded from the sweep: 0x02 is RESETC
+  (resets the FlatSat with any payload) and 0x06 is BROADCAST_MSG
+  (the crash from attack 02 -- needs a payload of exactly 0 bytes, which
+  this probe no longer sends, but better not to risk it during a demo).
+  Default: none excluded.
+- --seq 1 -> initial SPP sequence number. The exact value doesn't
+  matter, there's no anti-replay -- each APID automatically reserves
+  `retries` sequence numbers so it doesn't collide with the next attempt
+  or the next APID. Default 1.
+- --retries 3 -> attempts per APID before giving up and moving on to the
+  next one. Covers real RF noise / packet loss -- NOT the old TX/RX
+  single-device hardware gap (that one is already solved with the second
+  dedicated radio). The higher this is, the better it separates "APID
+  doesn't exist" from "lost to weak RF" -- in this session, raising it
+  from 3 to 6 retries resolved 10 of 15 APIDs that had come back "no
+  response." Default 2.
+- --listen-seconds 1.0 -> how long to wait after each probe before
+  checking what the receiver captured. The real response measured
+  between 11ms and ~215ms depending on the APID -- 1.0s is a generous
+  margin. Default 0.6.
+- --min-snr 0.0 -> minimum SNR in dB to treat a frame as a real response
+  and not leakage from our own transmission. ONLY has an effect with
+  --rx-device catsniffer (the only one that reports per-packet SNR);
+  with rtlsdr it's a silent no-op -- the packet-type filter (TC vs TM,
+  see above) does that job in both cases. Default
+  0.0 (leakage measured ~-1 to -3dB, real responses ~11-12dB with the
+  CatSniffer).
+- --tx-gain 20 -> HackRF TX (VGA) gain in dB. Same value confirmed in
+  attacks 02/03 that doesn't saturate the receiver. Default 20.
+- --rx-device {rtlsdr,catsniffer} -> which dedicated radio to use for
+  listening. Default rtlsdr (this session's CatSniffers ended up failing
+  at the hardware level). Pass --rx-device catsniffer once a healthy
+  CatSniffer is confirmed -- doesn't require touching C3.
+- --rx-gain 30 -> RTL-SDR tuner gain in dB. Only applies with
+  --rx-device rtlsdr. Default 30 (the same default already used by
+  gradio/pwnsat_rx_bridge.py for C3).
+- --catsniffer-port -> CatSniffer serial port if USB-descriptor
+  auto-detection fails. Only applies with --rx-device catsniffer.
+  Default: auto-detect.
+- --quiet -> hides hackrf_transfer output and RX device status
+  messages (useful for cleaner logs, but you lose the live visual
+  confirmation that RF actually went out and which APID is being probed
+  at each moment -- see buffering note below).
+
+CONFIRMATION THAT RF WAS ACTUALLY TRANSMITTED
+-------------------------------------------------------
+By default (without --quiet) the script shows the real output of
+`hackrf_transfer` for each probe. With --rx-device catsniffer, each
+captured response also includes real RSSI and SNR reported by the
+SX1262 chip itself -- independent evidence that the whole round trip
+really went out over the air. With rtlsdr there's no per-packet
+RSSI/SNR, but the GNU Radio flowgraph itself prints its own debug
+output ("Header checksum valid!", "CRC valid!") for every frame it
+decodes -- same idea, different source.
+
+NOTE ABOUT BUFFERING IF YOU USE `| tee` OR REDIRECT TO A FILE
+---------------------------------------------------------------------
+The script forces `sys.stdout.reconfigure(line_buffering=True)` on
+startup -- without this, when output isn't going to a terminal (for
+example with `| tee file.log`), Python buffers in full blocks instead of
+line by line, and the script's own lines ("[*] Probing APID...",
+"-> REAL RESPONSE...") can end up lagging WAY behind the raw noise from
+hackrf_transfer/GNU Radio -- in this session that masked, for quite a
+while, the early signal that the sweep was about to enter
+SET_BEACON_RATE right before the flood described above. With the fix
+already applied this shouldn't happen again, but if the same
+desync is ever seen again, this is the first suspect.
+
+SAVING THE RESULTS
+-------------------------
+The script doesn't write any file on its own, it only prints to screen.
+To save the full run (recommended, and what's used in the command
+above):
+
+    ... 2>&1 | tee sweep_resultados.log
+
+HOW TO TELL IT WORKED
+--------------------------
+In the script's terminal, for each APID:
+
+    [*] Probing APID 0x003 (SEND_FW)...
+        -> REAL RESPONSE (matches probed APID): APID 0x003 (SEND_FW) seq=431
+
+(with --rx-device catsniffer, RSSI=-48dBm SNR=11.0dB also appears at
+the end of that line.)
+
+At the end, a summary in three categories: "Real, implemented commands
+found" (the goal of the sweep), "Valid APID range, but not implemented"
+(answered with ERROR TM), and "No matching response" (inconclusive -- see
+the SET_THRUSTER/SET_BEACON_RATE note above, don't assume the APID
+doesn't exist without more context).
+
+HOW TO STOP IT
+-----------
+No need -- the script runs the full sweep and exits on its own, closing
+the RX device at the end (finally: cat.close()). If you need to cut it
+short, Ctrl+C -- both the CatSniffer and the RTL-SDR are left in a
+harmless state (just listening) when stopped this way.
+
+FINAL CATALOG -- CONFIRMED ON REAL HARDWARE, 2026-07-17 (via RTL-SDR)
+---------------------------------------------------------------------------
+Full sweep 0x00-0x14 (--skip 2 6), run in two passes (the second with
+--retries 6 over the APIDs that had come back "no response" in the
+first pass with --retries 3):
+
+Real, implemented commands (12):
+  0x001  PING
+  0x003  SEND_FW
+  0x007  FLASH
+  0x009  ERROR
+  0x00A  AES_CONFIG
+  0x00C  STATUS
+  0x00D  MISSION_MODE
+  0x00E  NAV
+  0x00F  PAYLOAD_STATUS
+  0x011  GS_MODE
+  0x012  GS_ACCESS
+  0x013  GS_STATUS
+
+Valid range, APID not implemented (ERROR TM) (5):
+  0x000, 0x008, 0x00B, 0x010, 0x014
+
+No radio response, but CONFIRMED from source code to be expected,
+not packet loss (2):
+  0x004  SET_THRUSTER      -- changes state, never calls dispatchTelemetryPacket
+  0x005  SET_BEACON_RATE   -- same (and also the one that causes the flood
+                               if probed with a zero payload, see above)
+
+Deliberately excluded, not probed (2):
+  0x002  RESETC            -- resets the FlatSat with any payload
+  0x006  BROADCAST_MSG     -- crash from finding #10 with a 0-byte payload
+
+19 of 19 APIDs in the 0x00-0x14 range are accounted for -- full coverage
+via pure radio listening, without ever having seen the firmware.
+
+
+
+final command:
+
+/opt/homebrew/bin/python3 00_recon_apid_enum.py --start 1 --end 0x13 --skip 2 3 6 7 --seq 500 --retries 6 --listen-seconds 1.2 --tx-gain 20 --rx-device rtlsdr --rx-gain 30 2>&1 | tee sweep_retry.log

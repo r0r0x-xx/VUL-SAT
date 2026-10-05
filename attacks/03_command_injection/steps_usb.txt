@@ -1,0 +1,70 @@
+PWNSAT -- ATTACK 03: COMMAND INJECTION (SET_THRUSTER without authentication, via USB)
+====================================================================
+
+WHAT IT DOES
+--------
+Same command as the RF version (see steps_rf.txt for the full
+detail -- groundStationCommandAllowed() lets any APID through by
+default, finding #13/#17): a single SET_THRUSTER (APID 0x04) changing
+the power of a real thruster, with no authentication at all. This script
+sends it straight over the USB cable instead of HackRF.
+
+FILES INVOLVED
+----------------------
+- attacks/03_command_injection/03_command_injection_usb.py  <- the script that gets executed
+- lib/flatsat_usb.py                                        <- USB transport (FlatSatUSB)
+
+HARDWARE ASSIGNMENT
+------------------------
+Just the USB cable. If PWNSAT-C3 is running, release the
+"serial" transport first:
+
+    curl -sb /tmp/c3_cookies.txt -X POST http://127.0.0.1:8791/api/transport/serial/release
+
+and reconnect it afterward to keep watching the Thruster gauge
+live:
+
+    curl -sb /tmp/c3_cookies.txt -X POST http://127.0.0.1:8791/api/transport/serial/reconnect
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+ONE. Transmits once and exits.
+
+PREREQUISITES
+---------------
+- FlatSat connected via USB, powered on.
+- ground-station/.venv/bin/python3 (real pyserial).
+- C3's "serial" transport released if it was running.
+
+REQUIRES INTERACTIVE INPUT?
+-----------------------------
+No.
+
+COMMAND
+-------
+    cd attacks/03_command_injection
+    ../../ground-station/.venv/bin/python3 03_command_injection_usb.py --thruster-id 0 --power 255
+
+The default for --thruster-id is 0, for --power is 200. Other flags: --seq,
+--encrypt {on,off} (default on), --port.
+
+HOW TO KNOW IT WORKED
+--------------------------
+SET_THRUSTER never transmits any TM back, neither over radio nor
+USB (confirmed by attack 00's own sweep) -- this script doesn't
+try to wait for a confirmation response, it just sends. Confirm via:
+- FlatSat's serial console: "Thruster 0 changed to: 255", immediate,
+  with no authentication step.
+- PWNSAT-C3 (with "serial" reconnected): the Thruster gauge/sparkline
+  jumps to the new value without the operator having touched any button.
+
+HOW TO STOP
+-----------
+Not needed -- transmits once and exits. The thruster stays at the
+sent value until the next SET_THRUSTER or until the mission enters
+SAFE/CONTINGENCY mode.
+
+VALIDATION STATUS
+------------------------
+NOT YET VALIDATED ON REAL HARDWARE -- see lib/flatsat_usb.py, "NOT
+YET VALIDATED ON REAL HARDWARE".

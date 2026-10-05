@@ -1,0 +1,118 @@
+PWNSAT -- ATTACK 02: FUZZING CRASH (integer underflow in BROADCAST_MSG)
+====================================================================
+
+WHAT IT DOES
+--------
+Sends ONE BROADCAST_MSG telecommand (APID 0x06) with a 0-byte payload.
+The firmware computes the message length as (payload_total - 2) as an
+UNSIGNED integer -- with payload_total=1 (the minimum this firmware
+can declare), that underflows to ~4.29 billion, which goes
+straight into memcpy() with no check at all. The FlatSat crashes and reboots.
+Severity: CRITICAL.
+
+FILES INVOLVED
+----------------------
+- attacks/02_fuzzing_crash/02_fuzzing_crash.py   <- the script that gets executed
+- lib/pwnsat_packets.py                          <- builds the SPP packet (not run directly)
+- lib/pwnsat_lora_tx.py                          <- transmits via HackRF (not run directly)
+- lib/require_gnuradio.py                        <- environment check (not run directly)
+
+HARDWARE ASSIGNMENT
+------------------------
+Uses the HackRF.
+The RTL-SDR stays dedicated to PWNSAT-C3, this attack doesn't touch it.
+
+A single HackRF = one attack at a time. If attack 01 (eavesdropping) is
+listening right now, it needs to be closed (Ctrl+C) before running
+this one, and vice versa.
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+ONE. The script builds the packet, transmits, and exits on its own -- it
+doesn't stay running in a loop like the eavesdropping one. You can have
+ANOTHER terminal open watching the FlatSat's serial console or the
+PWNSAT-C3 dashboard to see the effect, but it's not required for the
+attack itself to work.
+
+PREREQUISITES
+---------------
+- Homebrew Python with GNU Radio (see ../PWNSAT-C3-Release/INSTALL.md). The script
+  auto-detects if the python3 running it doesn't have gnuradio, and tells you
+  what to do -- no need to memorize the path.
+- The HackRF connected, with antenna, free.
+- The FlatSat powered on.
+
+REQUIRES INTERACTIVE INPUT?
+-----------------------------
+No. A single command with flags, transmits once and exits.
+
+COMMAND
+-------
+Terminal 1:
+
+    cd attacks/02_fuzzing_crash
+    ./02_fuzzing_crash.py
+
+With --encrypt=off if the secure-link is already disabled (attack 04) and
+you want to send in the clear:
+
+    ./02_fuzzing_crash.py --encrypt=off
+
+Other available flags: --seq (SPP sequence number), --gain (HackRF dB),
+--frequency (Hz, default 918000000 -- the real uplink).
+
+CONFIRMATION THAT IT ACTUALLY TRANSMITTED OVER RF
+-------------------------------------------------------
+By default (without --quiet) the script shows the real output of
+`hackrf_transfer` -- exact command + what the HackRF driver
+reports (frequency, power, transmission time). Independent evidence
+that real RF actually went out, not just script text.
+
+HOW TO KNOW IT WORKED -- CONFIRMED ON REAL HARDWARE (2026-07-17)
+------------------------------------------------------------------
+On the FlatSat's serial console: the output freezes mid-line,
+with no prior warning at all -- no red/yellow LED, no error message, unlike
+the "clean" reset from RESETC (07). This is the distinctive signature of
+this attack: if you see an LED pattern before it hangs, it wasn't
+this bug, it was something else.
+
+Unlike what was originally expected (USB disconnecting and
+re-enumerating on its own), in the real test the crash was severe
+enough to leave the USB port in a "zombie" state -- the
+device keeps showing up at /dev/tty.usbmodem* but reads a
+continuous stream of null bytes (\0) instead of reconnecting cleanly. It took
+unplugging and replugging the USB cable by hand for the FlatSat
+to respond again. The GPS LED can stay lit (the
+microcontroller didn't lose power, it's a software hang, not
+a shutdown).
+
+Effect on PWNSAT-C3: the backend can hang too -- its
+serial-port reader thread blocks reading the zombie stream, and
+new requests (login, /api/status) start taking forever/never respond.
+Symptom: curl/the browser hang against C3 even though the process is still
+"alive" in `ps aux`. Fix: kill and restart the C3 process
+AFTER reconnecting the FlatSat's USB (same pattern as the rest of
+the session for physical reconnections) -- nothing else is needed, the
+port auto-detect (see reference_pwnsat_c3_runtime) finds the
+binary link on its own.
+
+If nothing happens (neither the freeze nor the USB hang): confirm that the
+packet actually arrived (the FlatSat still looks "alive" on the
+dashboard, no telemetry gap) -- could be RF noise that
+corrupted the packet before it arrived, try again. If nothing still
+happens after several attempts, check that --frequency/
+--device-args match what the FlatSat is actually listening on (918
+MHz, see New-firmware/ruplink.h), and that --gain isn't so high it
+saturates reception (--gain 20 was used for the real confirmation).
+
+HOW TO STOP
+-----------
+Not needed -- the script transmits once and exits on its own. If the
+FlatSat is left in the zombie state described above, unplug/
+replug its USB cable (not the HackRF's) to recover it.
+
+
+Final command:
+
+/opt/homebrew/bin/python3 02_fuzzing_crash.py --seq 1 --encrypt on --device-args hackrf --gain 5 --frequency 918000000
+/opt/homebrew/bin/python3 02_fuzzing_crash.py --seq 1 --encrypt on --device-args hackrf --gain 20 --frequency 918000000

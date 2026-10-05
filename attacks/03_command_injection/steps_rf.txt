@@ -1,0 +1,139 @@
+PWNSAT -- ATTACK 03: COMMAND INJECTION (SET_THRUSTER without authentication)
+====================================================================
+
+WHAT IT DOES
+--------
+Sends ONE SET_THRUSTER telecommand (APID 0x04) changing the power of
+a real thruster, with no authentication at all. Unlike attack 02
+(a memory bug), this one does NOT exploit any programming error -- it's a
+legitimate command, working exactly as designed. The
+vulnerability is that groundStationCommandAllowed() (worker.cpp) lets
+any APID through as soon as mission_ctx.groundStationModeEnabled is
+false -- and that flag defaults to false in the compiled
+firmware (finding #13, the same root cause behind RESETC (07) and
+most of the attacks documented here). Severity: High.
+
+FILES INVOLVED
+----------------------
+- attacks/03_command_injection/03_command_injection.py   <- the script that gets executed
+- lib/pwnsat_packets.py                                  <- builds the SPP packet (not run directly)
+- lib/pwnsat_lora_tx.py                                  <- transmits via HackRF (not run directly)
+- lib/require_gnuradio.py                                <- environment check (not run directly)
+
+HARDWARE ASSIGNMENT
+------------------------
+Uses the HackRF.
+The RTL-SDR stays dedicated to PWNSAT-C3, this attack doesn't touch it.
+
+A single HackRF = one attack at a time. If attack 01 (eavesdropping) is
+listening, close it (Ctrl+C) before running this one.
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+ONE. The script builds the packet, transmits, and exits on its own.
+
+PREREQUISITES
+---------------
+- Homebrew Python with GNU Radio (see ../PWNSAT-C3-Release/INSTALL.md). The script
+  auto-detects if the python3 running it doesn't have gnuradio.
+- The HackRF connected, with antenna, free.
+- The FlatSat powered on.
+
+REQUIRES INTERACTIVE INPUT?
+-----------------------------
+No. A single command with flags, transmits once and exits.
+
+COMMAND
+-------
+Terminal 1:
+
+    cd attacks/03_command_injection
+    ./03_command_injection.py --thruster-id 0 --power 255
+
+The default for --thruster-id is 0, for --power is 200 (already above
+the dashboard's "warn" threshold) if not passed. The default gain is 20 dB
+-- confirmed in the debugging session as avoiding saturation of reception
+without falling short.
+
+Other flags: --seq, --encrypt=off (send in the clear, requires having
+brought down the secure-link first with attack 04), --frequency (default
+918000000, the real uplink).
+
+CONFIRMATION THAT IT ACTUALLY TRANSMITTED OVER RF
+-------------------------------------------------------
+By default (without --quiet) the script shows on screen the real output
+of `hackrf_transfer` -- the exact command it runs, then what
+the HackRF driver itself reports (tuned frequency, average power,
+total transmission time). That's independent evidence that
+real RF actually went out through the antenna, not just this script's text.
+Use --quiet to hide it (useful in automated runs).
+
+HOW TO KNOW IT WORKED
+--------------------------
+On the FlatSat's serial console, immediately, with no
+authentication step at all:
+
+    Thruster 0 changed to: 255
+
+In PWNSAT-C3: the Thruster 0 (or 1) gauge and sparkline jump to the
+new value without the operator having touched any dashboard button.
+If power is >=200, the "THRUSTERS" health ring goes to warn --
+same threshold the dashboard already has.
+
+LED: there's no specific pattern for this command -- the only LED
+that lights up is the blue "received a packet over radio" one
+(ruplink.cpp), same as with any other successful command. There's no
+crash or reset -- the FlatSat keeps working normally afterward, unlike
+attack 02.
+
+If nothing happens: confirm the packet arrived (dashboard still alive,
+no telemetry gap) -- could be RF noise, try again. If it
+persists, check --frequency/--gain.
+
+HOW TO STOP
+-----------
+Not needed -- the script transmits once and exits on its own. The
+thruster stays at the sent value until the next SET_THRUSTER (or
+until the mission enters SAFE/CONTINGENCY mode, which resets them to 0
+automatically -- see missionApplyMode() in worker.cpp).
+
+
+final command
+
+
+Step 1 -- confirm nothing else is using the HackRF:
+ps aux | grep -iE "pwnsat_rx_bridge|_fuzzing_crash|_command_injection|_resetc" | grep -v grep
+If 01_eavesdropping/pwnsat_rx_bridge.py shows up, stop it (Ctrl+C) first.
+
+Step 2 -- confirm the HackRF is connected:
+hackrf_info
+
+Step 3 -- go to the attack folder:
+cd Flatsat-Attacks-00-07/03_command_injection
+
+Step 4 -- full command, with all flags explicit (even if they're already the defaults):
+/opt/homebrew/bin/python3 03_command_injection.py --thruster-id 0 --power 255 --seq 1 --encrypt on --device-args hackrf --gain 20 --frequency 918000000
+
+- --thruster-id 0 -> which thruster (0 or 1)
+- --power 255 -> maximum power (0-255, no limit on the firmware side)
+- --seq 1 -> SPP sequence number (doesn't matter, no anti-replay)
+- --encrypt on -> encrypts the payload with the known AES key
+- --device-args hackrf -> which SDR to use (already the default)
+- --gain 20 -> HackRF TX gain in dB (the one we confirmed doesn't saturate)
+- --frequency 918000000 -> 918 MHz, real uplink
+
+Add --quiet at the end if you don't want to see hackrf_transfer's output.
+
+What to expect -- in the script's terminal:
+[*] SET_THRUSTER packet (encrypted, seq=1): ...
+[*] thruster_id=0  power=255 -- no authentication required
+[*] Transmitting on 918.000 MHz via hackrf (gain=20 dB)...
+[RF] .../hackrf_transfer -t ... -f 918000000 -s 2000000 -x 20 -a 1
+call hackrf_set_freq(918000000 Hz/918.000 MHz)
+... (real confirmation from the HackRF driver)
+[+] Sent. Check the FlatSat's serial console ("Thruster 0 changed to: 255") and PWNSAT-C3's Thruster gauge.
+
+What to expect -- on the FlatSat / ground station:
+- Serial console: appears immediately, with no authentication step: Thruster 0 changed to: 255
+- PWNSAT-C3: the Thruster 0 gauge and sparkline jump to the new value without you touching any dashboard button; if power >=200, the "THRUSTERS" health ring goes to warn
+- LED: just the normal blue "received a packet over radio" one -- no crash or reset, the FlatSat keeps working normally afterward

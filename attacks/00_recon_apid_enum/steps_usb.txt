@@ -1,0 +1,115 @@
+PWNSAT -- ATTACK 00: APID ENUMERATION (recon over USB)
+====================================================================
+
+WHAT IT DOES
+--------
+Same sweep as the RF version (see steps_rf.txt for the full explanation
+of the firmware's behavior): walks a range of APIDs, sending a small
+telecommand with a test payload to each one and classifying the response
+into three categories -- real implemented command, valid APID but not
+implemented (ERROR TM 0x009), or no response. The only real difference
+from the RF version is the delivery medium: instead of HackRF+RTL-SDR,
+this script sends each probe and listens for the response directly over
+FlatSat's real USB serial link (USBRadioLink, 921600 baud, binary
+framing 0xAA 0x55 <len> <SPP>) -- no radio in between, no RF noise, no
+need for a second device dedicated to RX.
+
+Being a point-to-point link over cable, two problems that dominate the
+RF version DISAPPEAR: there's no leakage from our own transmission
+bleeding into the receiver (there are no two separate frequencies
+involved), and there's no need for the second dedicated radio
+(RTL-SDR/CatSniffer) that the RF version needs because a single HackRF
+can't switch from TX to RX fast enough. The "real / not implemented / no
+response" classification is identical -- the firmware doesn't
+distinguish whether the TC arrived over radio or over USB, it's the same
+commandApidHandler().
+
+SAME SET_BEACON_RATE=0 DANGER -- already handled in the script (see
+steps_rf.txt, "REAL DANGER" section): PROBE_PAYLOAD uses 4 bytes of
+0x01, not 0x00, so as not to flood the downlink if the sweep lands on
+APID 0x005. No extra care is needed on your part.
+
+FILES INVOLVED
+----------------------
+- attacks/00_recon_apid_enum/00_recon_apid_enum_usb.py  <- the script that gets run
+- lib/flatsat_usb.py                                    <- USB transport (FlatSatUSB), auto-detects the port with a PING probe
+- lib/pwnsat_packets.py, ground-station/pwnsat_tools/spp_tools.py, pwnsat_crypto.py, usb_tc_send.py
+  -- build/decode the SPP packets (not run directly)
+
+HARDWARE ASSIGNMENT
+------------------------
+Just the FlatSat's USB cable -- neither HackRF nor RTL-SDR/CatSniffer
+come into play. If PWNSAT-C3 is running, it already has the serial port
+open (the "serial" transport) -- it needs to be released first:
+
+    curl -sb /tmp/c3_cookies.txt -X POST http://127.0.0.1:8791/api/transport/serial/release
+
+and reconnected afterward, once the attack is done:
+
+    curl -sb /tmp/c3_cookies.txt -X POST http://127.0.0.1:8791/api/transport/serial/reconnect
+
+(same release/reconnect pattern already used in the PWNCUBE dossier --
+avoids having to restart all of C3 just to lend the port to a standalone
+script.)
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+ONE. The script runs the full sweep on its own and exits.
+
+PREREQUISITES
+---------------
+- FlatSat connected over USB, powered on.
+- Real pyserial installed in the Python being used -- use
+  ground-station/.venv/bin/python3 (the default python3 from miniconda
+  on this Mac has a DIFFERENT, incompatible "serial" package, without
+  serial.tools.list_ports -- see lib/flatsat_usb.py).
+- If PWNSAT-C3 is running: release the "serial" transport first
+  (see above).
+
+DOES IT REQUIRE INTERACTIVE INPUT?
+-----------------------------
+No.
+
+COMMAND
+-------
+    cd attacks/00_recon_apid_enum
+    ../../ground-station/.venv/bin/python3 00_recon_apid_enum_usb.py --start 0 --end 0x14 --skip 2 6
+
+Flags (same names as the RF version where applicable):
+- --start / --end -> APID range, default 0x00-0x14.
+- --skip 2 6 -> excludes 0x02 (RESETC, resets the FlatSat) and 0x06
+  (BROADCAST_MSG, the crash from attack 02) -- same reasoning as in RF,
+  better not to risk it during a recon sweep.
+- --seq -> initial sequence count (the value doesn't matter, no
+  anti-replay).
+- --listen-seconds -> how long to wait for the response for each APID
+  (default 1.0s -- way more than enough on a wired link, the real
+  response arrives within milliseconds).
+- --port -> explicit serial port if auto-detection fails.
+- --quiet -> hides the hexdump of each frame sent/received.
+
+CONFIRMATION THAT IT WAS ACTUALLY SENT
+-------------------------------------------------------
+The script prints each frame sent (hex) and each response captured,
+with its APID and sequence_count decoded -- direct evidence of real
+bytes going back and forth over the serial port, nothing to infer.
+
+HOW TO TELL IT WORKED
+--------------------------
+Same as the RF version: for each APID, "REAL RESPONSE" (implemented
+command), "ERROR TM" (valid range, not implemented), or "no reply"
+(inconclusive -- remember SET_THRUSTER/SET_BEACON_RATE never send a TM
+by design, see steps_rf.txt). The final summary groups results into the
+same three categories.
+
+HOW TO STOP IT
+-----------
+No need -- it runs the full sweep and exits on its own.
+
+VALIDATION STATUS
+------------------------
+NOT YET VALIDATED ON REAL HARDWARE -- see lib/flatsat_usb.py, "NOT
+YET VALIDATED ON REAL HARDWARE". The mechanism (framing, AES key,
+port-detection strategy) is the same one already used by
+usb_tc_send.py and PWNSAT-C3, both confirmed working -- what's still
+missing is confirming this specific script against a real FlatSat.

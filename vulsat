@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Launcher de demo VUL-SAT. No toca C3 ni los PoCs: solo inyecta el puerto.
+set -euo pipefail
+PY="${PYTHON:-python3}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+PORT_FILE="$ROOT/.sat_port"
+C3_API="${C3_API:-http://127.0.0.1:8000}"
+
+port() { [ -f "$PORT_FILE" ] || { echo "No hay .sat_port — corré './vulsat sat' primero" >&2; exit 1; }; cat "$PORT_FILE"; }
+
+case "${1:-}" in
+  sat)
+    cd "$ROOT"; exec "$PY" -m vulsat_sim ;;
+  c3)
+    cd "$ROOT/PWNSAT-C3"
+    export PWNSAT_C3_SERIAL_PORT="$(port)"
+    # Shim de compatibilidad macOS/Linux: pyserial no puede fijar 921600 baud
+    # en un PTY (ioctl IOSSIOSPEED no soportado por el driver de pty). En un
+    # PTY el baud es cosmético, así que este shim lo clampea a 115200 solo
+    # para puertos PTY, sin tocar hardware real. No modificamos PWNSAT-C3/.
+    export PYTHONPATH="$ROOT/vulsat_sim/ptycompat${PYTHONPATH:+:$PYTHONPATH}"
+    echo "[vulsat] C3 -> $PWNSAT_C3_SERIAL_PORT"
+    exec "$PY" -m uvicorn backend.app:app --app-dir . ;;
+  attack)
+    shift; NN="${1:-}"; shift || true
+    d=$(ls -d "$ROOT/attacks/${NN}_"* 2>/dev/null | head -1)
+    [ -n "$d" ] || { echo "PoC $NN no encontrado (usá 00|01|02|03)" >&2; exit 1; }
+    # Mismo shim que en `c3`: los PoCs también abren el puerto con pyserial a
+    # 921600 (PROBE_BAUD), lo que falla contra el PTY en macOS sin esto.
+    export PYTHONPATH="$ROOT/vulsat_sim/ptycompat:$ROOT/PWNSAT-C3/pwnsat_tools${PYTHONPATH:+:$PYTHONPATH}"
+    if [ "$NN" = "01" ]; then
+      # 01 (eavesdropping) es una lectura PASIVA del bus: no tiene un
+      # *_usb.py propio en attacks/ (no hay nada que "enviar"). Lo sirve
+      # vulsat_sim/eavesdrop.py en su lugar.
+      cd "$ROOT"
+      echo "[vulsat] $PY -m vulsat_sim.eavesdrop --port $(port) $*"
+      exec "$PY" -m vulsat_sim.eavesdrop --port "$(port)" "$@"
+    fi
+    script=$(ls "$d"/*_usb.py | head -1)
+    echo "[vulsat] $script --port $(port) $*"
+    exec "$PY" "$script" --port "$(port)" "$@" ;;
+  login)
+    exec curl -s -c /tmp/c3_cookies.txt -H 'Content-Type: application/json' \
+      -d '{"username":"'"${PWNSAT_C3_USERNAME:-operator}"'","password":"'"${PWNSAT_C3_PASSWORD:-pwnsat}"'"}' \
+      "$C3_API/api/login" ;;
+  release)
+    exec curl -sb /tmp/c3_cookies.txt -X POST "$C3_API/api/transport/serial/release" ;;
+  reconnect)
+    exec curl -sb /tmp/c3_cookies.txt -X POST "$C3_API/api/transport/serial/reconnect" ;;
+  *)
+    echo "uso: ./vulsat {sat|c3|attack <NN> [args]|login|release|reconnect}" >&2; exit 1 ;;
+esac

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PWNSAT-C3 // Mission Select</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+  :root {
+    --bg: #1A1420;
+    --panel: #241C2C;
+    --panel-sunken: #150F1A;
+    --line: #3A2E44;
+    --ink: #EDE6E0;
+    --ink-soft: #9C8FA6;
+    --accent: #D9A441;
+    --accent-ink: #241A08;
+    --accent2: #4FD9A4;
+    --accent2-ink: #08241A;
+    --bad: #D9534F;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font-family: var(--mono); }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; overflow-x: hidden; position: relative; padding: 40px 20px;
+  }
+  canvas#stars { position: fixed; inset: 0; z-index: 0; }
+
+  .head { position: relative; z-index: 1; text-align: center; margin-bottom: 44px; animation: rise .5s ease both; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .16em; color: var(--accent); text-transform: uppercase; }
+  h1 { font-size: 30px; margin: 10px 0 8px; letter-spacing: .03em; }
+  .sub { font-size: 14px; color: var(--ink-soft); }
+
+  .fleet {
+    position: relative; z-index: 1;
+    display: flex; gap: 28px; flex-wrap: wrap; justify-content: center;
+    max-width: 920px;
+  }
+
+  .craft {
+    position: relative;
+    width: 380px; max-width: calc(100vw - 40px);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 32px 30px 28px;
+    text-align: left;
+    cursor: pointer;
+    animation: rise .6s ease both;
+    transition: border-color .15s ease, transform .12s ease, box-shadow .2s ease;
+  }
+  .craft:nth-child(2) { animation-delay: .08s; }
+  .craft::before, .craft::after { content: ""; position: absolute; width: 14px; height: 14px; opacity: .6; pointer-events: none; }
+  .craft::before { top: -1px; left: -1px; border-top: 2px solid var(--tint, var(--accent)); border-left: 2px solid var(--tint, var(--accent)); }
+  .craft::after { bottom: -1px; right: -1px; border-bottom: 2px solid var(--tint, var(--accent)); border-right: 2px solid var(--tint, var(--accent)); }
+  .craft:hover { transform: translateY(-3px); border-color: var(--tint, var(--accent)); box-shadow: 0 24px 60px -20px color-mix(in srgb, var(--tint, var(--accent)) 35%, transparent); }
+  .craft:focus-visible { outline: 2px solid var(--tint, var(--accent)); outline-offset: 3px; }
+
+  .craft.flatsat { --tint: var(--accent); }
+  .craft.pwncube { --tint: var(--accent2); }
+
+  .glyph { font-size: 34px; line-height: 1; margin-bottom: 14px; color: var(--tint, var(--accent)); }
+  .designation { font-size: 11px; letter-spacing: .14em; color: var(--ink-soft); text-transform: uppercase; }
+  .craft h2 { font-size: 21px; margin: 6px 0 10px; letter-spacing: .02em; }
+  .craft p { font-size: 13px; color: var(--ink-soft); line-height: 1.55; margin: 0 0 18px; min-height: 78px; }
+
+  .specs { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 22px; }
+  .specs span { font-size: 11px; color: var(--ink-soft); }
+  .specs span b { color: var(--ink); font-weight: 600; }
+
+  .go {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; background: var(--panel-sunken); border: 1px solid var(--line);
+    font-size: 12.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--tint, var(--accent));
+    transition: background .15s ease;
+  }
+  .craft:hover .go { background: color-mix(in srgb, var(--tint, var(--accent)) 12%, var(--panel-sunken)); }
+  .go .arrow { transition: transform .15s ease; }
+  .craft:hover .go .arrow { transform: translateX(4px); }
+
+  .foot { position: relative; z-index: 1; margin-top: 36px; font-size: 12px; color: var(--ink-soft); text-align: center; }
+  .foot a { color: var(--accent); text-decoration: none; }
+  .foot a:hover { text-decoration: underline; }
+
+  .cursor::after { content: "_"; color: var(--accent); animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .head, .craft { animation: none; }
+    .cursor::after { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <canvas id="stars"></canvas>
+
+  <div class="head">
+    <div class="eyebrow">Mission Control // Fleet Select</div>
+    <h1>Choose your spacecraft<span class="cursor"></span></h1>
+    <div class="sub">Select the target vehicle for this session</div>
+  </div>
+
+  <div class="fleet">
+    <button class="craft flatsat" data-platform="flatsat">
+      <div class="glyph">&#9737;</div>
+      <div class="designation">Vehicle 01</div>
+      <h2>FlatSat</h2>
+      <p>PWNSAT's original satellite security range. Real flight hardware laid out flat on a bench, riddled with intentional vulnerabilities for hands-on RF attacks.</p>
+      <div class="specs">
+        <span><b>MCU</b> RP2040</span>
+        <span><b>Link</b> USB / Radio</span>
+        <span><b>Protocol</b> CCSDS SPP</span>
+      </div>
+      <div class="go"><span>Connect</span><span class="arrow">&rarr;</span></div>
+    </button>
+
+    <button class="craft pwncube" data-platform="pwncube">
+      <div class="glyph">&#9634;</div>
+      <div class="designation">Vehicle 02</div>
+      <h2>PWNCUBE</h2>
+      <p>FlatSat's bigger sibling, more complete and more powerful. Same satellite security dossier, packed into a compact cube with a full Linux + RISC-V flight computer and dual radios.</p>
+      <div class="specs">
+        <span><b>SoC</b> RV1106</span>
+        <span><b>Link</b> USB / Radio</span>
+        <span><b>Protocol</b> CCSDS SPP</span>
+      </div>
+      <div class="go"><span>Connect</span><span class="arrow">&rarr;</span></div>
+    </button>
+  </div>
+
+  <div class="foot">Logged in as operator &middot; <a href="/api/logout">disconnect</a></div>
+
+<script>
+  // Faint animated starfield -- same as login, restrained, respects reduced-motion.
+  (function () {
+    const canvas = document.getElementById('stars');
+    const ctx = canvas.getContext('2d');
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let stars = [];
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      const count = Math.floor((canvas.width * canvas.height) / 9000);
+      stars = Array.from({ length: count }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        r: Math.random() * 1.2 + 0.2,
+        speed: Math.random() * 0.15 + 0.02,
+        twinkle: Math.random() * Math.PI * 2,
+      }));
+    }
+
+    function frame() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#D9A441';
+      for (const star of stars) {
+        star.twinkle += 0.02;
+        const alpha = 0.25 + Math.abs(Math.sin(star.twinkle)) * 0.5;
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+        ctx.fill();
+        if (!reduced) {
+          star.y += star.speed;
+          if (star.y > canvas.height) star.y = 0;
+        }
+      }
+      ctx.globalAlpha = 1;
+      requestAnimationFrame(frame);
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    frame();
+  })();
+
+  document.querySelectorAll('.craft').forEach((card) => {
+    card.addEventListener('click', async () => {
+      const platform = card.dataset.platform;
+      const res = await fetch('/api/platform', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform }),
+      });
+      if (res.ok) {
+        window.location.href = '/';
+      }
+    });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# VUL-SAT — requirements para todo el laboratorio (emulador + PoCs + C3).
+# PWNSAT-C3/requirements.txt se mantiene sin cambios (es vendored); este
+# archivo es el único install necesario para correr la demo completa.
+
+# Emulador (vulsat_sim) y PoCs de ataque
+pyserial>=3.5
+pycryptodome>=3.20
+
+# Ground station PWNSAT-C3 (backend web)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+itsdangerous>=2.1
+
+# Tests
+pytest>=8.0

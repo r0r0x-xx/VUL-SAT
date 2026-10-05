@@ -1,0 +1,144 @@
+PWNSAT -- ATTACK 01: EAVESDROPPING (passive downlink decryption)
+====================================================================
+
+WHAT IT DOES
+--------
+Listens to the FlatSat's real downlink (916.000 MHz) and decrypts the
+telemetry live with the static AES key already shipped in this same
+repo. 100% passive: transmits nothing, doesn't require logging into
+PWNSAT-C3, never interacts with the dashboard. See the RF dossier for
+the full root-cause explanation.
+
+FILES INVOLVED
+----------------------
+- attacks/01_eavesdropping/pwnsat_rx_bridge.py   <- the script that gets run
+- attacks/01_eavesdropping/pwnsat_lora_rx.py     <- LoRa flowgraph (not touched, not run directly)
+- lib/pwnsat_packets.py                          <- decryption is imported from here (not run directly)
+
+HARDWARE ASSIGNMENT (fixed for the whole dossier)
+-------------------------------------------------------
+- RTL-SDR: ALWAYS dedicated to PWNSAT-C3 (its own
+  gradio/pwnsat_rx_bridge.py, outside this folder). The attacks never
+  touch it.
+- HackRF: the one used by ALL the attacks in this folder, this one
+  included -- both the ones that transmit (02, 03, 05 TX half, 06, 07)
+  and this one, which only receives. That's why this script's default is
+  already --device-args hackrf, no need to pass it by hand.
+
+IMPORTANT -- a single HackRF means only one attack at a time. While this
+script is listening (RX), the HackRF is busy: you can't simultaneously
+run another attack in this folder that needs to transmit (02, 03, 06,
+07, or the TX half of 05). Closing this script (Ctrl+C) frees the
+HackRF for the next attack.
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+Just ONE terminal. The `pwnsat_rx_bridge.py` script is self-contained:
+within the same process it spins up the GNU Radio flowgraph (receives
+and demodulates) AND subscribes to its own output over ZMQ (to decrypt
+and print) -- no second process needed.
+
+HEADS UP -- PWNSAT-C3's RTL-SDR and this attack's HackRF are different
+physical devices, BUT both publish over ZMQ on the same default port
+(5005) -- that DOES clash, even though the devices are different
+(confirmed in this session: "RuntimeError: Address already in use" when
+trying to bring both up together on the default port). If PWNSAT-C3 is
+already running, this attack needs to be given a different port with
+--address (see COMMAND below).
+
+PREREQUISITES
+---------------
+- Homebrew Python with GNU Radio (NOT C3's backend .venv):
+    /opt/homebrew/bin/python3
+  Must be able to import: gnuradio, gnuradio.soapy, gnuradio.lora_sdr, zmq
+  (confirmed installed in this session).
+- The HackRF connected, with antenna, free (no other attack in this
+  folder using it at that moment).
+- The FlatSat powered on and transmitting (normal periodic telemetry --
+  no one needs to send any commands for there to be traffic to listen
+  to, the firmware sends beacons/telemetry on its own every 14-30s).
+
+DOES IT REQUIRE INTERACTIVE INPUT?
+-----------------------------
+No. Everything is configured via command-line flags at startup. Once
+running, the script only listens -- it doesn't ask for anything else via
+keyboard. Stop it with Ctrl+C (cleans up the connection and closes files
+if --output-file/--pcap-output-file was used).
+
+COMMAND
+-------
+Terminal 1 (only one needed):
+
+    cd attacks/01_eavesdropping
+    ./pwnsat_rx_bridge.py
+
+The file is executable and uses the usual portable shebang (`env
+python3`), so it picks up whatever `python3` your shell has on PATH.
+If that's not one with gnuradio installed, the script detects it on its
+own and tells you exactly which interpreter to try instead -- no need to
+guess or memorize any path (see ../PWNSAT-C3-Release/INSTALL.md if the
+message isn't enough to resolve it).
+
+Already uses HackRF by default -- no need to pass --device-args.
+
+If PWNSAT-C3 IS ALREADY running (its bridge has port 5005 taken), use a
+different port:
+
+    ./pwnsat_rx_bridge.py --address tcp://127.0.0.1:5006
+
+If PWNSAT-C3 is NOT running at the moment, the command above (without
+--address) works fine too, using the default 5005.
+
+How to tell if PWNSAT-C3 is running: `ps aux | grep pwnsat_rx_bridge`
+-- if a process with `gradio/pwnsat_rx_bridge.py` shows up (without
+`attacks/01_eavesdropping/` in the path), that's C3's, and you need to
+use --address with a different port.
+
+The script prints, in the same terminal, for every packet it captures:
+  - the raw hexdump
+  - STEP 3: SPP header in cleartext (APID, sequence number)
+  - STEP 4: whether it detects the repeated-ECB-block pattern
+  - STEP 5: the already-decrypted payload, in hex and ascii
+
+SAVING THE CAPTURE (optional, useful for the replay attack #6)
+-------------------------------------------------------------------
+Add to the command above:
+
+    --output-file ../../captures/eavesdrop_run1.bin
+
+Saves the RAW packets (undecrypted) with timestamps -- those are what
+later feeds attacks/06_replay.py.
+
+HOW TO TELL IT WORKED
+--------------------------
+On the attacker's terminal you should see, every time the FlatSat
+transmits something (at most every ~14-30s, without anyone sending any
+command):
+
+    =========== PACKET (eavesdropped) ===========
+    Length: ...
+    [hexdump]
+      [STEP 3] header parsed (cleartext) -- APID: SEND_TM (0x008)  seq=...
+      ciphertext (32 bytes): ...
+      [STEP 5] decrypted with the known static key (b'PWNsatLabKey1234')
+      PLAINTEXT (32 bytes): ...
+      ascii:     ...
+
+If "[!] decrypt failed" shows up instead, the most likely explanation is
+that the firmware has secure_link disabled at that moment (the bytes are
+already in cleartext, there's nothing to decrypt -- not a script error)
+or there was RF noise and the packet arrived corrupted.
+
+HOW TO STOP IT
+-----------
+Ctrl+C on the attacker's terminal. If a capture was being saved with
+--output-file, the file is closed properly (nothing else needed).
+
+
+Final commands:
+
+ /opt/homebrew/bin/python3 pwnsat_rx_bridge.py --address tcp://127.0.0.1:5006 --output-file eavesdrop_run1.bin
+
+ That's exactly the structure of GS_STATUS: spacecraft_id, flags, distance (0xFFFF = no GPS), session/challenge at zero, and at the end b8168f15 / 900f5fbb / b888 -- which are, byte for byte, 36.1699 / -115.1398 (Las Vegas) and a 35000 m radius -- the exact coordinates we configured on the firmware this same session. It's a perfect confirmation: the attack decrypted, live, without login or C3 access, a real packet transmitted by the FlatSat, and the content matches byte-for-byte what we knew it should say.
+
+./decode_capture.py eavesdrop_run1.bin : decode binary files

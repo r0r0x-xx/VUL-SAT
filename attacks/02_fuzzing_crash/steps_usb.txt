@@ -1,0 +1,82 @@
+PWNSAT -- ATTACK 02: FUZZING CRASH (integer underflow in BROADCAST_MSG, via USB)
+====================================================================
+
+WHAT IT DOES
+--------
+Same bug as the RF version (see steps_rf.txt for the full root-cause
+detail -- unsigned underflow in the BROADCAST_MSG length,
+unchecked memcpy()): a single BROADCAST_MSG telecommand (APID 0x06)
+with a 0-byte payload. The only difference is the delivery medium --
+this one goes straight over the USB cable (USBRadioLink) instead of HackRF. The
+bug is in the firmware handler, not in the radio link -- it doesn't
+matter how the packet arrives.
+
+FILES INVOLVED
+----------------------
+- attacks/02_fuzzing_crash/02_fuzzing_crash_usb.py  <- the script that gets executed
+- lib/flatsat_usb.py                                <- USB transport (FlatSatUSB)
+
+HARDWARE ASSIGNMENT
+------------------------
+Just the USB cable. If PWNSAT-C3 is running, release the
+"serial" transport first:
+
+    curl -sb /tmp/c3_cookies.txt -X POST http://127.0.0.1:8791/api/transport/serial/release
+
+HOW MANY TERMINALS ARE NEEDED
+--------------------------------
+ONE. Transmits once and exits.
+
+PREREQUISITES
+---------------
+- FlatSat connected via USB, powered on.
+- ground-station/.venv/bin/python3 (real pyserial -- see
+  lib/flatsat_usb.py, miniconda's default python3 has the wrong
+  package).
+- C3's "serial" transport released if it was running (see above).
+
+REQUIRES INTERACTIVE INPUT?
+-----------------------------
+No.
+
+COMMAND
+-------
+    cd attacks/02_fuzzing_crash
+    ../../ground-station/.venv/bin/python3 02_fuzzing_crash_usb.py
+
+Flags: --seq, --encrypt {on,off} (default on), --port (autodetect by
+default).
+
+WHAT TO EXPECT -- IMPORTANT, DIFFERENT FROM THE RF VERSION
+-------------------------------------------------------
+The very USB port used to send the attack is the same one that
+goes down when the firmware crashes -- unlike the RF version (where
+the TX HackRF is a completely separate physical channel from the FlatSat's
+USB), here the script's own connection can drop mid-read
+while waiting for confirmation. The script already expects this (try/except
+around the send) and prints a notice instead of failing ugly. The
+connection dropping DURING the send is, if anything, evidence in favor
+of the crash having worked, not a script error.
+
+HOW TO KNOW IT WORKED
+--------------------------
+Same behavior as the RF version (see steps_rf.txt): the FlatSat
+reboots CLEANLY (unlike PWNCUBE, which leaves rpmsg permanently
+dead) -- serial console freezes mid-line with no prior
+warning, the USB port can end up "zombie" (still shows up
+but only reads null bytes) until you unplug/replug the cable by
+hand. PWNSAT-C3 (if it was running with "serial" reconnected) can
+hang too -- same fix, restart C3 after reconnecting the
+FlatSat's USB.
+
+Confirm in PWNSAT-C3 after reconnecting: uptime_s goes back to 0.
+
+HOW TO STOP
+-----------
+Not needed -- transmits once and exits. If the FlatSat ends up
+zombie, unplug/replug its USB cable.
+
+VALIDATION STATUS
+------------------------
+NOT YET VALIDATED ON REAL HARDWARE -- see lib/flatsat_usb.py, "NOT
+YET VALIDATED ON REAL HARDWARE".

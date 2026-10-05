@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PWNSAT-C3 // Login</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+  :root {
+    --bg: #1A1420;
+    --panel: #241C2C;
+    --panel-sunken: #150F1A;
+    --line: #3A2E44;
+    --ink: #EDE6E0;
+    --ink-soft: #9C8FA6;
+    --accent: #D9A441;
+    --accent-ink: #241A08;
+    --bad: #D9534F;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--mono); }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
+  canvas#stars { position: fixed; inset: 0; z-index: 0; }
+
+  .card {
+    position: relative; z-index: 1;
+    width: 460px;
+    max-width: calc(100vw - 40px);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 48px 48px 44px;
+    animation: rise .5s ease both;
+    box-shadow: 0 30px 90px -24px rgba(217, 164, 65, 0.18);
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+  .card::before, .card::after { content: ""; position: absolute; width: 14px; height: 14px; opacity: .6; pointer-events: none; }
+  .card::before { top: -1px; left: -1px; border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+  .card::after { bottom: -1px; right: -1px; border-bottom: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+
+  .logo { display: block; width: 120px; height: 120px; margin: 0 auto 20px; }
+  .eyebrow { font-size: 12.5px; letter-spacing: .16em; color: var(--accent); text-transform: uppercase; text-align: center; }
+  h1 { font-size: 28px; margin: 10px 0 8px; letter-spacing: .03em; text-align: center; }
+  .sub { font-size: 14px; color: var(--ink-soft); margin-bottom: 32px; text-align: center; }
+
+  label { font-size: 12.5px; color: var(--ink-soft); display: block; margin: 18px 0 6px; }
+  input {
+    width: 100%; background: var(--panel-sunken); border: 1px solid var(--line); color: var(--ink);
+    font-family: var(--mono); font-size: 16px; padding: 13px 14px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+
+  button {
+    margin-top: 30px; width: 100%; padding: 15px; font-family: var(--mono); font-size: 14.5px;
+    letter-spacing: .05em; font-weight: 600; background: var(--accent); color: var(--accent-ink); border: none; cursor: pointer;
+    transition: filter .15s ease, transform .1s ease;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:active { transform: scale(.98); }
+
+  .error {
+    margin-top: 18px; font-size: 13px; color: var(--bad);
+    border: 1px solid var(--bad); padding: 11px 13px; display: none;
+    animation: shake .3s ease;
+  }
+  .error.show { display: block; }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-4px); }
+    75% { transform: translateX(4px); }
+  }
+
+  .cursor::after {
+    content: "_"; color: var(--accent); animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card { animation: none; }
+    .cursor::after { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <canvas id="stars"></canvas>
+
+  <form class="card" id="loginForm">
+    <img class="logo" src="/icon.png" alt="PWNSAT-C3">
+    <div class="eyebrow">Ground Segment</div>
+    <h1>PWNSAT-C3<span class="cursor"></span></h1>
+    <div class="sub">Authenticate to reach the FlatSat console</div>
+
+    <label for="username">Operator</label>
+    <input id="username" name="username" autocomplete="username" required>
+
+    <label for="password">Passphrase</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+    <button type="submit">Connect</button>
+    <div class="error" id="loginError">Invalid credentials.</div>
+  </form>
+
+<script>
+  // Faint animated starfield -- restrained, respects reduced-motion.
+  (function () {
+    const canvas = document.getElementById('stars');
+    const ctx = canvas.getContext('2d');
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let stars = [];
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      const count = Math.floor((canvas.width * canvas.height) / 9000);
+      stars = Array.from({ length: count }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        r: Math.random() * 1.2 + 0.2,
+        speed: Math.random() * 0.15 + 0.02,
+        twinkle: Math.random() * Math.PI * 2,
+      }));
+    }
+
+    function frame() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#D9A441';
+      for (const star of stars) {
+        star.twinkle += 0.02;
+        const alpha = 0.25 + Math.abs(Math.sin(star.twinkle)) * 0.5;
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+        ctx.fill();
+        if (!reduced) {
+          star.y += star.speed;
+          if (star.y > canvas.height) star.y = 0;
+        }
+      }
+      ctx.globalAlpha = 1;
+      requestAnimationFrame(frame);
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    frame();
+  })();
+
+  document.getElementById('loginForm').addEventListener('submit', async (evt) => {
+    evt.preventDefault();
+    const errorBox = document.getElementById('loginError');
+    errorBox.classList.remove('show');
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (res.ok) {
+      window.location.href = '/';
+    } else {
+      errorBox.classList.add('show');
+    }
+  });
+</script>
+</body>
+</html>
