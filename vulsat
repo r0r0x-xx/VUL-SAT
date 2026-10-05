@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 # Launcher de demo VUL-SAT. No toca C3 ni los PoCs: solo inyecta el puerto.
+#
+# Doble PTY: el emulador publica DOS puertos sobre el mismo SatelliteCore
+# -- .c3_port (para la ground station) y .sat_port (para los PoCs de
+# ataque) -- así C3 queda conectado permanentemente mientras los ataques
+# corren en el otro extremo: ya no hace falta release/reconnect.
 set -euo pipefail
 PY="${PYTHON:-python3}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-PORT_FILE="$ROOT/.sat_port"
+C3_PORT_FILE="$ROOT/.c3_port"
+SAT_PORT_FILE="$ROOT/.sat_port"
 C3_API="${C3_API:-http://127.0.0.1:8000}"
 
-port() { [ -f "$PORT_FILE" ] || { echo "No hay .sat_port — corré './vulsat sat' primero" >&2; exit 1; }; cat "$PORT_FILE"; }
+c3_port() { [ -f "$C3_PORT_FILE" ] || { echo "No hay .c3_port — corré './vulsat sat' primero" >&2; exit 1; }; cat "$C3_PORT_FILE"; }
+port() { [ -f "$SAT_PORT_FILE" ] || { echo "No hay .sat_port — corré './vulsat sat' primero" >&2; exit 1; }; cat "$SAT_PORT_FILE"; }
 
 case "${1:-}" in
   sat)
     cd "$ROOT"; exec "$PY" -m vulsat_sim ;;
   c3)
     cd "$ROOT/PWNSAT-C3"
-    export PWNSAT_C3_SERIAL_PORT="$(port)"
+    export PWNSAT_C3_SERIAL_PORT="$(c3_port)"
     # Shim de compatibilidad macOS/Linux: pyserial no puede fijar 921600 baud
     # en un PTY (ioctl IOSSIOSPEED no soportado por el driver de pty). En un
     # PTY el baud es cosmético, así que este shim lo clampea a 115200 solo
@@ -43,10 +50,12 @@ case "${1:-}" in
     exec curl -s -c /tmp/c3_cookies.txt -H 'Content-Type: application/json' \
       -d '{"username":"'"${PWNSAT_C3_USERNAME:-operator}"'","password":"'"${PWNSAT_C3_PASSWORD:-pwnsat}"'"}' \
       "$C3_API/api/login" ;;
-  release)
-    exec curl -sb /tmp/c3_cookies.txt -X POST "$C3_API/api/transport/serial/release" ;;
-  reconnect)
-    exec curl -sb /tmp/c3_cookies.txt -X POST "$C3_API/api/transport/serial/reconnect" ;;
+  release|reconnect)
+    # No-op: con el doble PTY (.c3_port / .sat_port) C3 nunca suelta su
+    # puerto -- los ataques usan el puerto .sat_port en paralelo. Se deja
+    # el subcomando por compatibilidad con scripts/demos viejos.
+    echo "[vulsat] '$1' ya no hace falta: C3 (.c3_port) y los ataques (.sat_port)" \
+         "usan puertos separados sobre el mismo satélite." ;;
   *)
     echo "uso: ./vulsat {sat|c3|attack <NN> [args]|login|release|reconnect}" >&2; exit 1 ;;
 esac

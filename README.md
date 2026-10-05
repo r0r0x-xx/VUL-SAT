@@ -46,16 +46,30 @@ pip install -r requirements.txt
 
 ## 4. Arquitectura (resumen)
 
-El emulador abre un PTY y publica el nombre del extremo esclavo en
-`.sat_port`. PWNSAT-C3 y los PoCs leen ese archivo y abren el mismo PTY como
-si fuera un puerto serie real, hablando el protocolo SPP (con AES opcional)
-que define `PWNSAT-C3/pwnsat_tools`. El emulador, C3 y los PoCs comparten
-exactamente ese mismo toolkit vendored: nadie re-deriva el framing.
+El emulador abre **dos** PTY sobre el mismo satélite emulado (mismo
+`SatelliteCore`, mismo estado) y publica cada extremo esclavo en un
+archivo: `.c3_port` para la ground station y `.sat_port` para los PoCs de
+ataque. PWNSAT-C3 y los PoCs leen el archivo que les corresponde y abren
+ese PTY como si fuera un puerto serie real, hablando el protocolo SPP (con
+AES opcional) que define `PWNSAT-C3/pwnsat_tools`. El emulador, C3 y los
+PoCs comparten exactamente ese mismo toolkit vendored: nadie re-deriva el
+framing.
+
+La telemetría se difunde a **ambos** puertos y los telecomandos de
+**cualquiera** de los dos se procesan contra el mismo estado: C3 queda
+conectado todo el tiempo mientras los PoCs atacan por el otro puerto, sin
+necesidad de soltar/retomar el serial.
 
 ```
-vulsat_sim (FlatSat) <--PTY-->  PWNSAT-C3 (dashboard)
-                      <--PTY-->  attacks/00..03 (PoCs)
+                      <--PTY (.c3_port)-->  PWNSAT-C3 (dashboard)
+vulsat_sim (FlatSat)
+                      <--PTY (.sat_port)--> attacks/00..03 (PoCs)
 ```
+
+El emulador también simula GPS: el satélite arranca sobre **Cartago,
+Costa Rica** y su traza terrestre avanza con el tiempo; la ground station
+(GS_STATUS) está fija en **Ciudad de México**, con la distancia real
+(haversine) entre ambos puntos.
 
 ## 5. Ejecución paso a paso (3 terminales)
 
@@ -65,8 +79,9 @@ vulsat_sim (FlatSat) <--PTY-->  PWNSAT-C3 (dashboard)
 ./vulsat sat
 ```
 
-Levanta el FlatSat con una TUI de órbita en vivo y publica el PTY en
-`.sat_port`. Dejá esta terminal visible durante toda la demo.
+Levanta el FlatSat con una TUI de órbita (y posición GPS) en vivo, y
+publica los dos PTY en `.c3_port` y `.sat_port`. Dejá esta terminal
+visible durante toda la demo.
 
 **Terminal 2 — ground station:**
 
@@ -80,17 +95,15 @@ FlatSat en el dashboard.
 
 **Terminal 3 — ataques:**
 
-El flujo replica el del laboratorio real: primero hay que liberar el serial
-que tiene tomado C3, ejecutar el PoC, y luego devolvérselo a C3.
+Gracias al doble PTY, C3 no necesita soltar el puerto: los PoCs atacan por
+`.sat_port` mientras C3 sigue conectado por `.c3_port`.
 
 ```bash
-./vulsat login                 # autentica y guarda la cookie de sesión
-./vulsat release                # libera el puerto serie (C3 deja de usarlo)
+./vulsat login                   # autentica y guarda la cookie de sesión
 ./vulsat attack 00               # recon: enumera APIDs válidos del bus
 ./vulsat attack 01               # eavesdrop: telemetría descifrada en vivo
 ./vulsat attack 02               # fuzzing: crash del satélite + reboot automático
 ./vulsat attack 03 --power 255   # inyección de comando: thruster a 255 sin auth
-./vulsat reconnect               # C3 vuelve a tomar el puerto serie
 ```
 
 Qué observar en cada PoC:
