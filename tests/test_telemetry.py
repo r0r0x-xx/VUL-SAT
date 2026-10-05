@@ -1,6 +1,9 @@
 import vulsat_sim.vendored  # noqa: F401
 from spp_tools import decode_packet
-from vulsat_sim.satellite_core import SatelliteCore, SatelliteState, APID_STATUS, APID_NAV
+from vulsat_sim.satellite_core import (
+    SatelliteCore, SatelliteState, APID_STATUS, APID_NAV, APID_SENSOR,
+    APID_GS_STATUS, APID_PAYLOAD_STATUS, APID_MISSION_MODE,
+)
 from vulsat_sim.telemetry import TelemetryScheduler
 
 
@@ -23,3 +26,16 @@ def test_scheduler_emits_status_and_nav_when_due():
     frames = sched.due(elapsed=1000.0)  # bien pasado cualquier cadencia
     apids = {decode_packet(f).apid for f in frames}
     assert APID_STATUS in apids and APID_NAV in apids
+
+
+def test_scheduler_cold_start_emits_full_set_immediately():
+    # due(0.0) en un scheduler recién creado debe disparar los 6 tipos de
+    # TM (cold-start: el dashboard no debe arrancar con paneles vacíos).
+    core = SatelliteCore(SatelliteState(aes_enabled=False))
+    sched = TelemetryScheduler(core, send=lambda b: None)
+    frames = sched.due(elapsed=0.0)
+    apids = {decode_packet(f).apid for f in frames}
+    assert apids == {
+        APID_STATUS, APID_NAV, APID_SENSOR, APID_GS_STATUS,
+        APID_PAYLOAD_STATUS, APID_MISSION_MODE,
+    }

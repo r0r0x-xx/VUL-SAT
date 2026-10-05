@@ -34,6 +34,8 @@ def render(state: SatelliteState, width: int = 72) -> str:
         f"AES: {'ON ' if state.aes_enabled else 'OFF'}   LINK: {link}",
         f"  UPTIME: {state.uptime_s:>5}s   APIDs vistos: "
         + " ".join(f"{a:02X}" for a in sorted(state.seen_apids)),
+        f"  GPS: lat {state.lat_e7 / 1e7:+.4f}  lon {state.lon_e7 / 1e7:+.4f}"
+        f"  alt {state.alt_cm / 100000.0:.1f} km",
         "",
     ]
     if state.crashed:

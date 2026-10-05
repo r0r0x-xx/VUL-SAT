@@ -18,14 +18,16 @@ def main() -> None:
     sched = TelemetryScheduler(core, send=link.send_tm)
     stop = threading.Event()
 
-    print(f"[vulsat] PTY satelite en: {link.slave_name}")
-    print(f"[vulsat] puerto publicado en .sat_port — Ctrl-C para salir")
+    print(f"[vulsat] PTY C3 en:      {link.c3_slave_name}  (publicado en .c3_port)")
+    print(f"[vulsat] PTY atacante en: {link.sat_slave_name}  (publicado en .sat_port)")
+    print(f"[vulsat] Ctrl-C para salir")
     time.sleep(1.0)
 
-    # Envío inicial de STATUS/NAV para que C3 y la TUI no arranquen en
-    # blanco hasta el primer ciclo de TelemetryScheduler.due().
-    link.send_tm(core.build_status_tm(0))
-    link.send_tm(core.build_nav_tm(0))
+    # Cold-start: due(0.0) dispara un ciclo completo de TODOS los tipos de
+    # TM (STATUS/NAV/SENSOR/GS_STATUS/PAYLOAD_STATUS/MISSION_MODE) para que
+    # C3 y la TUI no arranquen con los paneles vacíos.
+    for frame in sched.due(0.0):
+        link.send_tm(frame)
 
     t0 = time.monotonic()
     crashed_at = None
