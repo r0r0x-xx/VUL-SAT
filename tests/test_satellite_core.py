@@ -12,7 +12,10 @@ def test_ping_gets_a_response():
     core = SatelliteCore(SatelliteState(aes_enabled=False))
     out = core.handle_tc(build_tc(APID_PING, b"", 1))
     assert len(out) == 1
-    assert decode_packet(out[0]).apid == APID_PING
+    pkt = decode_packet(out[0])
+    assert pkt.apid == APID_PING
+    # payload = spacecraft_id(1) + "PONG" (ver decode_ping_ack)
+    assert pkt.data == b"\x01PONG"
 
 
 def test_valid_but_unimplemented_apid_returns_error_tm():
@@ -42,7 +45,7 @@ def test_encrypted_ping_roundtrips_when_aes_on():
     pkt = decode_packet(out[0])
     assert pkt.apid == APID_PING
     # la respuesta viene cifrada -> se puede descifrar sin error
-    assert decrypt_payload(pkt.data) == b"\x01"
+    assert decrypt_payload(pkt.data) == b"\x01PONG"
 
 
 def test_aes_toggle_off_then_plaintext_accepted():
@@ -52,7 +55,7 @@ def test_aes_toggle_off_then_plaintext_accepted():
     assert core.state.aes_enabled is False
     # ahora un PING en claro debe responder en claro
     out = core.handle_tc(build_tc(APID_PING, b"", 2))
-    assert decode_packet(out[0]).data == b"\x01"
+    assert decode_packet(out[0]).data == b"\x01PONG"
 
 
 def test_set_thruster_without_auth_changes_power():
